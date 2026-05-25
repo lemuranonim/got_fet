@@ -34,3 +34,9 @@ flutter:
     - assets/logo_fet_unbox.png
     - assets/background.png
     - .env
+
+flutter_launcher_icons:
+  android: true
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#0d3a62"
+  adaptive_icon_foreground: "assets/icon_foreground.png"
