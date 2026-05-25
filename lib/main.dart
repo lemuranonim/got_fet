@@ -9,6 +9,7 @@ import 'screens/login_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/session_manager.dart';
 import 'theme/app_theme.dart';
+import 'theme/theme_controller.dart';
 
 final _router = GoRouter(
   initialLocation: '/splash',
@@ -50,13 +51,18 @@ class GotFetApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp.router(
-      title: 'GOT & FET',
-      theme: AdvantaTheme.light(),
-      darkTheme: AdvantaTheme.dark(),
-      themeMode: ThemeMode.light,
-      routerConfig: _router,
-      debugShowCheckedModeBanner: false,
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeController,
+      builder: (context, mode, _) {
+        return MaterialApp.router(
+          title: 'GOT & FET',
+          theme: AdvantaTheme.light(),
+          darkTheme: AdvantaTheme.dark(),
+          themeMode: mode,
+          routerConfig: _router,
+          debugShowCheckedModeBanner: false,
+        );
+      },
     );
   }
 }
@@ -94,6 +100,8 @@ Future<void> main() async {
       url: dotenv.env['SUPABASE_URL']!,
       anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
     );
+
+    await themeController.load();
 
     runApp(const GotFetApp());
   } catch (e) {

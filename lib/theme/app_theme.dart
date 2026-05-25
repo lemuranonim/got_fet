@@ -1,255 +1,300 @@
-// lib/theme/app_theme.dart
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. BRAND COLORS
-// ─────────────────────────────────────────────────────────────────────────────
 class AdvantaColors {
   AdvantaColors._();
 
+  static const Color navy = Color(0xFF06346F);
+  static const Color navyDeep = Color(0xFF031A3D);
+  static const Color navyDark = Color(0xFF06152F);
+  static const Color blue = Color(0xFF1687D9);
+  static const Color green = Color(0xFF25B34B);
+  static const Color greenDark = Color(0xFF0B8E45);
+  static const Color greenSoft = Color(0xFFEAF8EE);
+  static const Color skySoft = Color(0xFFEFF8FF);
+  static const Color lightSurface = Color(0xFFFFFFFF);
+  static const Color lightBackground = Color(0xFFF5FAFF);
+  static const Color darkSurface = Color(0xFF0B2347);
+  static const Color darkSurfaceAlt = Color(0xFF0E2D5B);
+  static const Color lineLight = Color(0xFFE2EAF3);
+  static const Color lineDark = Color(0xFF264A76);
+  static const Color textDark = Color(0xFF06214A);
+  static const Color textMuted = Color(0xFF6B7A90);
+  static const Color textMutedDark = Color(0xFF9FB2CF);
+  static const Color warning = Color(0xFFF6A11A);
+
   static const Color deepForest = Color(0xFF0D3D2B);
-  static const Color primaryGreen = Color(0xFF1A5E3F);
-  static const Color midGreen = Color(0xFF2E7D52);
-  static const Color lightGreen = Color(0xFF4CAF79);
-  static const Color paleGreen = Color(0xFFE8F5EE);
-
-  static const Color gold = Color(0xFFD4A017);
-  static const Color goldLight = Color(0xFFF2C84B);
+  static const Color primaryGreen = green;
+  static const Color midGreen = greenDark;
+  static const Color lightGreen = Color(0xFF61D37F);
+  static const Color paleGreen = greenSoft;
+  static const Color gold = warning;
+  static const Color goldLight = Color(0xFFFFCB55);
   static const Color goldPale = Color(0xFFFFF8E1);
-
-  static const Color cream = Color(0xFFFAF7F0);
+  static const Color cream = Color(0xFFFAFCFF);
   static const Color charcoal = Color(0xFF1C2526);
-
-  // Pastikan baris di bawah ini ada!
-  static const Color softGrey = Color(0xFFF4F5F4);
-
-  static const Color dividerGrey = Color(0xFFE0E3E0);
-  static const Color mutedGrey = Color(0xFF8E9A8E);
-
-  static const Color success = Color(0xFF2E7D52);
-  static const Color successLight = Color(0xFFE8F5EE);
-  static const Color error = Color(0xFFD32F2F);
-  static const Color errorLight = Color(0xFFFFEBEE);
+  static const Color softGrey = Color(0xFFF3F7FB);
+  static const Color dividerGrey = lineLight;
+  static const Color mutedGrey = textMuted;
+  static const Color success = green;
+  static const Color successLight = greenSoft;
+  static const Color error = Color(0xFFE04F5F);
+  static const Color errorLight = Color(0xFFFFEEF0);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. TYPOGRAPHY
-// ─────────────────────────────────────────────────────────────────────────────
 class AdvantaText {
   AdvantaText._();
   static const String _fontFamily = 'Nunito';
 
   static const TextStyle display = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 32,
-      fontWeight: FontWeight.w800,
-      letterSpacing: -0.5,
-      height: 1.2);
+    fontFamily: _fontFamily,
+    fontSize: 32,
+    fontWeight: FontWeight.w900,
+    letterSpacing: 0,
+    height: 1.12,
+  );
   static const TextStyle heading1 = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 22,
-      fontWeight: FontWeight.w700,
-      height: 1.3);
+    fontFamily: _fontFamily,
+    fontSize: 22,
+    fontWeight: FontWeight.w800,
+    letterSpacing: 0,
+    height: 1.24,
+  );
   static const TextStyle heading2 = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 18,
-      fontWeight: FontWeight.w700,
-      height: 1.35);
+    fontFamily: _fontFamily,
+    fontSize: 18,
+    fontWeight: FontWeight.w800,
+    letterSpacing: 0,
+    height: 1.28,
+  );
   static const TextStyle heading3 = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 15,
-      fontWeight: FontWeight.w700,
-      height: 1.4);
+    fontFamily: _fontFamily,
+    fontSize: 15,
+    fontWeight: FontWeight.w800,
+    letterSpacing: 0,
+    height: 1.35,
+  );
   static const TextStyle body1 = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 14,
-      fontWeight: FontWeight.w400,
-      height: 1.5);
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    fontWeight: FontWeight.w500,
+    letterSpacing: 0,
+    height: 1.48,
+  );
   static const TextStyle body2 = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 13,
-      fontWeight: FontWeight.w400,
-      height: 1.5);
+    fontFamily: _fontFamily,
+    fontSize: 13,
+    fontWeight: FontWeight.w500,
+    letterSpacing: 0,
+    height: 1.45,
+  );
   static const TextStyle bodyBold = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 14,
-      fontWeight: FontWeight.w600,
-      height: 1.5);
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    fontWeight: FontWeight.w800,
+    letterSpacing: 0,
+    height: 1.42,
+  );
   static const TextStyle label = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 12,
-      fontWeight: FontWeight.w600,
-      height: 1.4);
+    fontFamily: _fontFamily,
+    fontSize: 12,
+    fontWeight: FontWeight.w800,
+    letterSpacing: 0,
+    height: 1.35,
+  );
   static const TextStyle caption = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 11,
-      fontWeight: FontWeight.w400,
-      height: 1.4);
+    fontFamily: _fontFamily,
+    fontSize: 11,
+    fontWeight: FontWeight.w600,
+    letterSpacing: 0,
+    height: 1.35,
+  );
   static const TextStyle button = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 14,
-      fontWeight: FontWeight.w800,
-      letterSpacing: 1.2,
-      height: 1.0);
-
+    fontFamily: _fontFamily,
+    fontSize: 14,
+    fontWeight: FontWeight.w900,
+    letterSpacing: 0,
+    height: 1,
+  );
   static const TextStyle brandTitle = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 16,
-      fontWeight: FontWeight.w800,
-      letterSpacing: 0.5);
+    fontFamily: _fontFamily,
+    fontSize: 16,
+    fontWeight: FontWeight.w900,
+    letterSpacing: 0,
+  );
   static const TextStyle brandSubtitle = TextStyle(
-      fontFamily: _fontFamily,
-      fontSize: 11,
-      fontWeight: FontWeight.w400,
-      letterSpacing: 1.5);
+    fontFamily: _fontFamily,
+    fontSize: 11,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 0,
+  );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. RADII & SHADOWS
-// ─────────────────────────────────────────────────────────────────────────────
 class AdvantaRadius {
   AdvantaRadius._();
-  static const BorderRadius cardRadius =
-      BorderRadius.all(Radius.circular(12.0));
-  static const BorderRadius inputRadius =
-      BorderRadius.all(Radius.circular(12.0));
-  static const BorderRadius chipRadius =
-      BorderRadius.all(Radius.circular(100.0));
+  static const BorderRadius cardRadius = BorderRadius.all(Radius.circular(8));
+  static const BorderRadius inputRadius = BorderRadius.all(Radius.circular(12));
+  static const BorderRadius chipRadius = BorderRadius.all(Radius.circular(100));
   static const BorderRadius sheetRadius =
-      BorderRadius.vertical(top: Radius.circular(20.0));
+      BorderRadius.vertical(top: Radius.circular(24));
   static const BorderRadius dialogRadius =
-      BorderRadius.all(Radius.circular(16.0));
+      BorderRadius.all(Radius.circular(22));
   static const BorderRadius buttonRadius =
-      BorderRadius.all(Radius.circular(12.0));
+      BorderRadius.all(Radius.circular(12));
 }
 
 class AdvantaShadows {
   AdvantaShadows._();
+
   static List<BoxShadow> card(bool isDark) => [
         BoxShadow(
           color: isDark
-              ? Colors.black.withAlpha(80)
-              : AdvantaColors.deepForest.withAlpha(18),
-          blurRadius: 12,
-          offset: const Offset(0, 4),
+              ? Colors.black.withAlpha(90)
+              : AdvantaColors.navy.withAlpha(16),
+          blurRadius: isDark ? 20 : 18,
+          offset: const Offset(0, 8),
         ),
       ];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. THEME DATA (Light & Dark)
-// ─────────────────────────────────────────────────────────────────────────────
 class AdvantaTheme {
   AdvantaTheme._();
 
-  // 🌞 LIGHT MODE: High Outdoor Readability
   static ThemeData light() {
     final colorScheme = const ColorScheme.light(
-      primary: AdvantaColors.primaryGreen,
+      primary: AdvantaColors.green,
       onPrimary: Colors.white,
-      secondary: AdvantaColors.gold,
-      onSecondary: AdvantaColors.charcoal,
-      surface: AdvantaColors.cream,
-      onSurface: AdvantaColors.deepForest, // High contrast text
+      secondary: AdvantaColors.blue,
+      onSecondary: Colors.white,
+      surface: AdvantaColors.lightSurface,
+      onSurface: AdvantaColors.textDark,
       error: AdvantaColors.error,
       onError: Colors.white,
     );
 
-    return _buildTheme(colorScheme, AdvantaColors.softGrey);
+    return _buildTheme(colorScheme, AdvantaColors.lightBackground);
   }
 
-  // 🌙 DARK MODE: Corporate Luxury & Golden Harvest
   static ThemeData dark() {
     final colorScheme = const ColorScheme.dark(
-      primary: AdvantaColors.primaryGreen,
+      primary: AdvantaColors.green,
       onPrimary: Colors.white,
-      secondary: AdvantaColors.goldLight,
-      onSecondary: AdvantaColors.deepForest,
-      surface: AdvantaColors.midGreen, // Cards/surfaces are midGreen
-      onSurface: AdvantaColors.goldLight, // Text/accents are goldLight
+      secondary: AdvantaColors.blue,
+      onSecondary: Colors.white,
+      surface: AdvantaColors.darkSurface,
+      onSurface: Colors.white,
       error: AdvantaColors.error,
       onError: Colors.white,
     );
 
-    return _buildTheme(
-        colorScheme, AdvantaColors.deepForest); // Background is deepForest
+    return _buildTheme(colorScheme, AdvantaColors.navyDark);
   }
 
   static ThemeData _buildTheme(ColorScheme colorScheme, Color scaffoldBgColor) {
     final isDark = colorScheme.brightness == Brightness.dark;
+    final outline = isDark ? AdvantaColors.lineDark : AdvantaColors.lineLight;
+    final muted =
+        isDark ? AdvantaColors.textMutedDark : AdvantaColors.textMuted;
+    final surface = isDark ? AdvantaColors.darkSurface : Colors.white;
 
     return ThemeData(
       useMaterial3: true,
       fontFamily: 'Nunito',
+      brightness: colorScheme.brightness,
       colorScheme: colorScheme,
       scaffoldBackgroundColor: scaffoldBgColor,
+      visualDensity: VisualDensity.standard,
       appBarTheme: AppBarTheme(
-        backgroundColor:
-            isDark ? AdvantaColors.deepForest : AdvantaColors.primaryGreen,
-        foregroundColor: isDark ? AdvantaColors.goldLight : Colors.white,
+        backgroundColor: isDark ? AdvantaColors.navyDark : Colors.white,
+        foregroundColor: isDark ? Colors.white : AdvantaColors.textDark,
+        surfaceTintColor: Colors.transparent,
         elevation: 0,
         centerTitle: false,
         systemOverlayStyle:
             isDark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
         titleTextStyle: AdvantaText.brandTitle.copyWith(
-          color: isDark ? AdvantaColors.goldLight : Colors.white,
+          color: isDark ? Colors.white : AdvantaColors.textDark,
         ),
         iconTheme: IconThemeData(
-            color: isDark ? AdvantaColors.goldLight : Colors.white, size: 22),
+          color: isDark ? Colors.white : AdvantaColors.textDark,
+          size: 22,
+        ),
       ),
       cardTheme: CardThemeData(
-        color: colorScheme.surface,
+        color: surface,
         elevation: 0,
+        margin: EdgeInsets.zero,
         shape: RoundedRectangleBorder(
           borderRadius: AdvantaRadius.cardRadius,
-          side: BorderSide(
-              color: isDark
-                  ? AdvantaColors.goldLight.withAlpha(30)
-                  : AdvantaColors.charcoal.withAlpha(12)),
+          side: BorderSide(color: outline),
         ),
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
           backgroundColor: colorScheme.primary,
           foregroundColor: colorScheme.onPrimary,
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+          disabledBackgroundColor: colorScheme.primary.withAlpha(105),
+          disabledForegroundColor: Colors.white.withAlpha(170),
+          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 22),
           textStyle: AdvantaText.button,
           shape: const RoundedRectangleBorder(
-              borderRadius: AdvantaRadius.buttonRadius),
+            borderRadius: AdvantaRadius.buttonRadius,
+          ),
+          elevation: 0,
+        ),
+      ),
+      outlinedButtonTheme: OutlinedButtonThemeData(
+        style: OutlinedButton.styleFrom(
+          foregroundColor: isDark ? Colors.white : AdvantaColors.navy,
+          side: BorderSide(color: outline),
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
+          shape: const RoundedRectangleBorder(
+            borderRadius: AdvantaRadius.buttonRadius,
+          ),
+          textStyle: AdvantaText.button,
         ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: isDark
-            ? AdvantaColors.deepForest.withAlpha(150)
-            : AdvantaColors.softGrey,
-        labelStyle: AdvantaText.body2.copyWith(
-            color: isDark
-                ? AdvantaColors.goldLight.withAlpha(180)
-                : AdvantaColors.mutedGrey),
-        hintStyle: AdvantaText.body2.copyWith(
-            color: isDark
-                ? AdvantaColors.goldLight.withAlpha(150)
-                : AdvantaColors.mutedGrey),
+        fillColor:
+            isDark ? AdvantaColors.navyDeep.withAlpha(160) : Colors.white,
+        labelStyle: AdvantaText.body2.copyWith(color: muted),
+        hintStyle: AdvantaText.body2.copyWith(color: muted.withAlpha(180)),
+        prefixIconColor:
+            isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy,
+        suffixIconColor:
+            isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy,
         contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        border: OutlineInputBorder(
-            borderRadius: AdvantaRadius.inputRadius,
-            borderSide: BorderSide.none),
+            const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+        border: const OutlineInputBorder(
+          borderRadius: AdvantaRadius.inputRadius,
+          borderSide: BorderSide.none,
+        ),
         enabledBorder: OutlineInputBorder(
           borderRadius: AdvantaRadius.inputRadius,
-          borderSide: BorderSide(
-              color: isDark
-                  ? AdvantaColors.goldLight.withAlpha(50)
-                  : AdvantaColors.charcoal.withAlpha(18)),
+          borderSide: BorderSide(color: outline),
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: AdvantaRadius.inputRadius,
-          borderSide: BorderSide(
-              color: isDark ? AdvantaColors.goldLight : colorScheme.primary,
-              width: 1.5),
+          borderSide: BorderSide(color: colorScheme.primary, width: 1.6),
+        ),
+      ),
+      navigationBarTheme: NavigationBarThemeData(
+        height: 66,
+        backgroundColor: isDark ? AdvantaColors.navyDeep : Colors.white,
+        indicatorColor: isDark
+            ? AdvantaColors.green.withAlpha(38)
+            : AdvantaColors.greenSoft,
+        surfaceTintColor: Colors.transparent,
+        labelTextStyle: WidgetStateProperty.resolveWith(
+          (states) => AdvantaText.caption.copyWith(
+            color: states.contains(WidgetState.selected)
+                ? AdvantaColors.green
+                : muted,
+            fontWeight: states.contains(WidgetState.selected)
+                ? FontWeight.w900
+                : FontWeight.w700,
+          ),
         ),
       ),
       textTheme: TextTheme(
@@ -269,9 +314,6 @@ class AdvantaTheme {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. REUSABLE WIDGETS (Context-Aware)
-// ─────────────────────────────────────────────────────────────────────────────
 class AdvantaBanner extends StatelessWidget {
   final String message;
   final bool isError;
@@ -287,22 +329,19 @@ class AdvantaBanner extends StatelessWidget {
 
     final bg = isError
         ? (isDark
-            ? AdvantaColors.error.withAlpha(40)
+            ? AdvantaColors.error.withAlpha(34)
             : AdvantaColors.errorLight)
         : (isDark
-            ? AdvantaColors.midGreen.withAlpha(80)
-            : AdvantaColors.paleGreen);
-
-    final fg = isError
-        ? (isDark ? const Color(0xFFFF8A80) : AdvantaColors.error)
-        : (isDark ? AdvantaColors.goldLight : AdvantaColors.primaryGreen);
+            ? AdvantaColors.green.withAlpha(30)
+            : AdvantaColors.greenSoft);
+    final fg = isError ? AdvantaColors.error : AdvantaColors.greenDark;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: AdvantaRadius.cardRadius,
-        border: Border.all(color: fg.withAlpha(60)),
+        border: Border.all(color: fg.withAlpha(isDark ? 90 : 60)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,

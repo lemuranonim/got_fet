@@ -8,6 +8,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../services/session_manager.dart';
 import '../services/supabase_auth_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/got_fet_loading.dart';
 
 class GotFetSplashScreen extends StatefulWidget {
   const GotFetSplashScreen({super.key});
@@ -18,6 +19,16 @@ class GotFetSplashScreen extends StatefulWidget {
 
 class _GotFetSplashScreenState extends State<GotFetSplashScreen> {
   String _version = 'Loading...';
+  double _progress = .18;
+  int _stageIndex = 0;
+  String _loadingTitle = 'Splash / Loading';
+  String _loadingMessage = 'Menyiapkan pengalaman inspeksi digital.';
+
+  static const _stages = [
+    'Splash',
+    'Sinkronisasi',
+    'Modul',
+  ];
 
   @override
   void initState() {
@@ -38,7 +49,13 @@ class _GotFetSplashScreenState extends State<GotFetSplashScreen> {
   }
 
   Future<void> _continue() async {
-    await Future.delayed(const Duration(milliseconds: 900));
+    await Future.delayed(const Duration(milliseconds: 420));
+    _setLoadingStage(
+      index: 1,
+      progress: .54,
+      title: 'Sinkronisasi Data Inspeksi',
+      message: 'Memuat profil, role, dan preferensi akun.',
+    );
 
     final auth = SupabaseAuthService();
     final supabaseUser = Supabase.instance.client.auth.currentUser;
@@ -47,6 +64,8 @@ class _GotFetSplashScreenState extends State<GotFetSplashScreen> {
     if (!mounted) return;
 
     if (supabaseUser == null || session == null) {
+      await Future.delayed(const Duration(milliseconds: 360));
+      if (!mounted) return;
       context.go('/login');
       return;
     }
@@ -56,105 +75,209 @@ class _GotFetSplashScreenState extends State<GotFetSplashScreen> {
         incomingUserId: supabaseUser.id,
       );
       if (!mounted) return;
+      await Future.delayed(const Duration(milliseconds: 240));
+      if (!mounted) return;
       context.go('/login');
       return;
     }
 
+    _setLoadingStage(
+      index: 2,
+      progress: .86,
+      title: 'Menyiapkan Dashboard',
+      message: 'Menyusun modul, preferensi, dan data penting.',
+    );
+
     final restored = await auth.restoreSession();
+    if (!mounted) return;
+    _setLoadingStage(
+      index: 2,
+      progress: 1,
+      title: restored == null ? 'Mengarahkan Login' : 'Dashboard Siap',
+      message: restored == null
+          ? 'Sesi perlu diperbarui sebelum masuk.'
+          : 'Data berhasil disiapkan untuk inspeksi.',
+    );
+    await Future.delayed(const Duration(milliseconds: 360));
     if (!mounted) return;
     context.go(restored == null ? '/login' : '/got-fet');
   }
 
+  void _setLoadingStage({
+    required int index,
+    required double progress,
+    required String title,
+    required String message,
+  }) {
+    if (!mounted) return;
+    setState(() {
+      _stageIndex = index;
+      _progress = progress;
+      _loadingTitle = title;
+      _loadingMessage = message;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
-    final bgColors = isDark
-        ? [
-            AdvantaColors.deepForest,
-            const Color(0xFF112E20),
-            const Color(0xFF0A2318),
-          ]
-        : [
-            const Color(0xFF061A44),
-            const Color(0xFF0A3D5E),
-            AdvantaColors.primaryGreen,
-          ];
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final textColor = isDark ? Colors.white : AdvantaColors.navy;
+    final mutedColor =
+        isDark ? Colors.white.withAlpha(190) : AdvantaColors.greenDark;
 
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: bgColors,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          Image.asset(
+            'assets/background.png',
+            fit: BoxFit.cover,
+            alignment: Alignment.bottomCenter,
           ),
-        ),
-        child: SafeArea(
-          child: Center(
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: isDark
+                  ? LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        AdvantaColors.navyDark.withAlpha(246),
+                        AdvantaColors.navy.withAlpha(225),
+                        Colors.black.withAlpha(170),
+                      ],
+                    )
+                  : LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        Colors.white.withAlpha(235),
+                        Colors.white.withAlpha(188),
+                        Colors.white.withAlpha(18),
+                      ],
+                    ),
+            ),
+          ),
+          SafeArea(
             child: Padding(
-              padding: const EdgeInsets.all(28),
+              padding: const EdgeInsets.fromLTRB(28, 34, 28, 28),
               child: Column(
-                mainAxisSize: MainAxisSize.min,
                 children: [
+                  const Spacer(flex: 2),
                   Container(
-                    width: 132,
-                    height: 132,
-                    padding: const EdgeInsets.all(4),
+                    width: 154,
+                    height: 154,
+                    padding: const EdgeInsets.all(18),
                     decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(32),
-                      color: Colors.white.withAlpha(20),
-                      border: Border.all(color: Colors.white.withAlpha(60)),
+                      shape: BoxShape.circle,
+                      color: isDark
+                          ? AdvantaColors.navyDeep.withAlpha(150)
+                          : Colors.white.withAlpha(180),
+                      border: Border.all(
+                        color: isDark
+                            ? Colors.white.withAlpha(42)
+                            : Colors.white.withAlpha(220),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: (isDark ? Colors.cyan : AdvantaColors.blue)
+                              .withAlpha(isDark ? 70 : 28),
+                          blurRadius: 48,
+                          spreadRadius: 8,
+                        ),
+                      ],
                     ),
                     child: Image.asset(
-                      'assets/logo_got_fet.png',
+                      'assets/logo_got_fet_unbox.png',
                       fit: BoxFit.contain,
-                      errorBuilder: (_, __, ___) => const Icon(
-                        Icons.eco_rounded,
-                        color: Colors.white,
-                        size: 42,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 28),
-                  Text(
-                    'GOT & FET',
-                    style: AdvantaText.display.copyWith(
-                      color: Colors.white,
-                      fontSize: 32,
-                      letterSpacing: 0,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Seed quality workflow',
-                    style: AdvantaText.body2.copyWith(
-                      color: Colors.white.withAlpha(180),
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 30),
-                  const SizedBox(
-                    width: 28,
-                    height: 28,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2.5,
-                      color: Colors.white,
                     ),
                   ),
                   const SizedBox(height: 24),
                   Text(
+                    'GOT & FET',
+                    textAlign: TextAlign.center,
+                    style: AdvantaText.display.copyWith(
+                      color: textColor,
+                      fontSize: 32,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Grow Out Test &\nField Emergence Test',
+                    textAlign: TextAlign.center,
+                    style: AdvantaText.heading3.copyWith(
+                      color: mutedColor,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const Spacer(flex: 3),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? AdvantaColors.navyDeep.withAlpha(184)
+                          : Colors.white.withAlpha(216),
+                      borderRadius: AdvantaRadius.cardRadius,
+                      border: Border.all(
+                        color: isDark
+                            ? Colors.white.withAlpha(30)
+                            : Colors.white.withAlpha(210),
+                      ),
+                      boxShadow: AdvantaShadows.card(isDark),
+                    ),
+                    child: Column(
+                      children: [
+                        GotFetCircularProgress(
+                          progress: _progress,
+                          size: 82,
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          _loadingTitle,
+                          textAlign: TextAlign.center,
+                          style: AdvantaText.heading3.copyWith(
+                            color: textColor,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          _loadingMessage,
+                          textAlign: TextAlign.center,
+                          style: AdvantaText.caption.copyWith(
+                            color: isDark
+                                ? Colors.white.withAlpha(180)
+                                : AdvantaColors.textMuted,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        GotFetStepProgress(
+                          steps: _stages,
+                          activeIndex: _stageIndex,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
                     'v$_version',
                     style: AdvantaText.caption.copyWith(
-                      color: Colors.white.withAlpha(150),
-                      fontWeight: FontWeight.w700,
+                      color: isDark
+                          ? Colors.white.withAlpha(150)
+                          : Colors.white.withAlpha(210),
+                      shadows: [
+                        Shadow(
+                          color: Colors.black.withAlpha(100),
+                          blurRadius: 10,
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }

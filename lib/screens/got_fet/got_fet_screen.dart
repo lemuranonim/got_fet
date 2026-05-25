@@ -9,21 +9,59 @@ import 'package:intl/intl.dart';
 import '../../services/got_fet_service.dart';
 import '../../services/session_manager.dart';
 import '../../theme/app_theme.dart';
+import '../../theme/theme_controller.dart';
+import '../../widgets/got_fet_loading.dart';
 
 class _GotFetUi {
-  static const navy = Color(0xFF061A44);
-  static const green = Color(0xFF009B54);
-  static const greenDark = Color(0xFF007A43);
-  static const greenPale = Color(0xFFE8F7EF);
-  static const surface = Color(0xFFF6F8FB);
-  static const line = Color(0xFFE3E8F0);
+  static const navy = AdvantaColors.navy;
+  static const green = AdvantaColors.green;
+  static const greenDark = AdvantaColors.greenDark;
+  static const line = AdvantaColors.lineLight;
 }
 
 class _GotFetAssets {
-  static const appLogo = 'assets/logo_got_fet.png';
-  static const gotLogo = 'assets/logo_got.png';
-  static const fetLogo = 'assets/logo_fet.png';
+  static const appLogo = 'assets/logo_got_fet_unbox.png';
+  static const gotLogo = 'assets/logo_got_unbox.png';
+  static const fetLogo = 'assets/logo_fet_unbox.png';
 }
+
+bool _gotFetIsDark(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark;
+
+Color _gotFetScreenColor(BuildContext context) => _gotFetIsDark(context)
+    ? AdvantaColors.navyDark
+    : AdvantaColors.lightBackground;
+
+Color _gotFetCardColor(BuildContext context) => _gotFetIsDark(context)
+    ? AdvantaColors.darkSurface.withAlpha(236)
+    : Colors.white;
+
+Color _gotFetBorderColor(BuildContext context) => _gotFetIsDark(context)
+    ? AdvantaColors.lineDark.withAlpha(220)
+    : AdvantaColors.lineLight;
+
+Color _gotFetTextColor(BuildContext context) =>
+    _gotFetIsDark(context) ? Colors.white : AdvantaColors.textDark;
+
+Color _gotFetMutedColor(BuildContext context) => _gotFetIsDark(context)
+    ? AdvantaColors.textMutedDark
+    : AdvantaColors.textMuted;
+
+List<BoxShadow>? _gotFetShadow(BuildContext context) => _gotFetIsDark(context)
+    ? [
+        BoxShadow(
+          color: Colors.black.withAlpha(64),
+          blurRadius: 22,
+          offset: const Offset(0, 10),
+        ),
+      ]
+    : [
+        BoxShadow(
+          color: AdvantaColors.navy.withAlpha(14),
+          blurRadius: 20,
+          offset: const Offset(0, 8),
+        ),
+      ];
 
 enum _GotFetPage {
   home,
@@ -155,17 +193,25 @@ class _GotFetScreenState extends State<GotFetScreen> {
     setState(() => _page = page);
   }
 
+  void _toggleTheme() {
+    final next = Theme.of(context).brightness == Brightness.dark
+        ? ThemeMode.light
+        : ThemeMode.dark;
+    themeController.setMode(next);
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
-      backgroundColor: isDark ? AdvantaColors.deepForest : _GotFetUi.surface,
+      backgroundColor: _gotFetScreenColor(context),
       appBar: AppBar(
         automaticallyImplyLeading: false,
         toolbarHeight: 66,
-        backgroundColor: _GotFetUi.navy,
-        foregroundColor: Colors.white,
+        backgroundColor:
+            isDark ? AdvantaColors.navyDark : AdvantaColors.lightSurface,
+        foregroundColor: _gotFetTextColor(context),
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         leading: _page == _GotFetPage.home
@@ -181,7 +227,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             Text(
               _pageTitle,
               style: AdvantaText.brandTitle.copyWith(
-                color: Colors.white,
+                color: _gotFetTextColor(context),
                 fontSize: 16,
                 fontWeight: FontWeight.w900,
                 letterSpacing: 0,
@@ -193,7 +239,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: AdvantaText.caption.copyWith(
-                color: Colors.white.withAlpha(175),
+                color: _gotFetMutedColor(context),
                 fontWeight: FontWeight.w700,
                 letterSpacing: 0,
               ),
@@ -201,6 +247,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: isDark ? 'Gunakan light mode' : 'Gunakan dark mode',
+            icon: Icon(
+              isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+            ),
+            onPressed: _toggleTheme,
+          ),
           IconButton(
             tooltip: 'User Settings',
             icon: const Icon(Icons.account_circle_rounded),
@@ -224,8 +277,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ],
       ),
       bottomNavigationBar: NavigationBar(
-        backgroundColor: isDark ? AdvantaColors.deepForest : Colors.white,
-        indicatorColor: _GotFetUi.greenPale,
+        backgroundColor:
+            isDark ? AdvantaColors.navyDeep : AdvantaColors.lightSurface,
+        indicatorColor: isDark
+            ? AdvantaColors.green.withAlpha(44)
+            : AdvantaColors.greenSoft,
         surfaceTintColor: Colors.transparent,
         selectedIndex: _bottomIndex,
         onDestinationSelected: _openBottomDestination,
@@ -394,20 +450,20 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final actions = [
       _MenuAction(
         'Lot Tracking',
-        'Status resi sample',
+        'Status sample',
         Icons.inventory_2_rounded,
         _GotFetPage.lotTracking,
       ),
       _MenuAction(
         'GOT Photo',
-        'Guided capture',
+        'Foto tanaman',
         Icons.center_focus_strong_rounded,
         _GotFetPage.gotPhoto,
         logoAsset: _GotFetAssets.gotLogo,
       ),
       _MenuAction(
         'GOT Input',
-        'Purity result',
+        'Purity',
         Icons.fact_check_rounded,
         _GotFetPage.gotInput,
         logoAsset: _GotFetAssets.gotLogo,
@@ -421,21 +477,21 @@ class _GotFetScreenState extends State<GotFetScreen> {
       ),
       _MenuAction(
         'FET Analisa',
-        'Auto count result',
+        'Auto count',
         Icons.analytics_rounded,
         _GotFetPage.fetAnalysis,
         logoAsset: _GotFetAssets.fetLogo,
       ),
       _MenuAction(
         'FET Input',
-        'Final emergence',
+        'Emergence',
         Icons.edit_note_rounded,
         _GotFetPage.fetInput,
         logoAsset: _GotFetAssets.fetLogo,
       ),
       _MenuAction(
         'Review Status',
-        'Approve/revisi',
+        'Approve',
         Icons.verified_rounded,
         _GotFetPage.review,
       ),
@@ -449,7 +505,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columns = constraints.maxWidth > 640 ? 4 : 3;
+        final columns = constraints.maxWidth >= 720
+            ? 4
+            : constraints.maxWidth >= 360
+                ? 3
+                : 2;
+        final childRatio = switch (columns) {
+          4 => 1.24,
+          3 => .82,
+          _ => 1.12,
+        };
         return GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
@@ -458,7 +523,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             crossAxisCount: columns,
             crossAxisSpacing: 10,
             mainAxisSpacing: 10,
-            childAspectRatio: columns == 4 ? 1.55 : 0.96,
+            childAspectRatio: childRatio,
           ),
           itemBuilder: (context, index) {
             final action = actions[index];
@@ -1545,18 +1610,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   TextStyle _mutedTextStyle(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return AdvantaText.caption.copyWith(
-      color: isDark
-          ? AdvantaColors.goldLight.withAlpha(155)
-          : AdvantaColors.mutedGrey,
-    );
+    return AdvantaText.caption.copyWith(color: _gotFetMutedColor(context));
   }
 
   Color _strongTextColor(BuildContext context) {
-    return Theme.of(context).brightness == Brightness.dark
-        ? AdvantaColors.goldLight
-        : AdvantaColors.deepForest;
+    return _gotFetTextColor(context);
   }
 
   List<_GotFetSample> _seedSamples() {
@@ -1661,34 +1719,10 @@ class _LoadingOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
-      color: Colors.black45,
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            borderRadius: BorderRadius.circular(14),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(strokeWidth: 2.5),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                'Menyimpan...',
-                style: AdvantaText.bodyBold.copyWith(
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    return const GotFetOverlayLoader(
+      title: 'Menyimpan hasil inspeksi...',
+      message: 'Sinkronisasi data GOT & FET ke server sedang berjalan.',
+      progress: .72,
     );
   }
 }
@@ -1704,89 +1738,210 @@ class _BrandHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final bg = isDark ? AdvantaColors.deepForest : _GotFetUi.navy;
+    final isDark = _gotFetIsDark(context);
+    final textColor = isDark ? Colors.white : AdvantaColors.textDark;
+    final mutedColor = _gotFetMutedColor(context);
+    final borderColor =
+        isDark ? Colors.white.withAlpha(26) : AdvantaColors.lineLight;
+    final highlight = isDark ? const Color(0xFF7BE48C) : _GotFetUi.greenDark;
 
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(
-            color: _GotFetUi.navy.withAlpha(isDark ? 60 : 34),
-            blurRadius: 18,
-            offset: const Offset(0, 8),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: isDark
+              ? const [
+                  AdvantaColors.navyDeep,
+                  AdvantaColors.navyDark,
+                  AdvantaColors.darkSurface,
+                ]
+              : const [
+                  Colors.white,
+                  AdvantaColors.skySoft,
+                  Color(0xFFE8F6FF),
+                ],
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: borderColor),
+        boxShadow: _gotFetShadow(context),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Stack(
+        children: [
+          Positioned(
+            right: -28,
+            bottom: -42,
+            child: Opacity(
+              opacity: isDark ? 0.08 : 0.10,
+              child: Image.asset(
+                _GotFetAssets.appLogo,
+                width: 210,
+                fit: BoxFit.contain,
+              ),
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Image.asset(
+                    _GotFetAssets.appLogo,
+                    width: 78,
+                    height: 50,
+                    fit: BoxFit.contain,
+                    errorBuilder: (_, __, ___) => Icon(
+                      Icons.fact_check_rounded,
+                      color: highlight,
+                      size: 34,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'GOT & FET',
+                          style: AdvantaText.heading2.copyWith(
+                            color: textColor,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Digital Inspection for Quality Seeds',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AdvantaText.caption.copyWith(
+                            color: highlight,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? Colors.white.withAlpha(10)
+                          : AdvantaColors.skySoft,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: borderColor),
+                    ),
+                    child: Icon(
+                      Icons.notifications_none_rounded,
+                      color: textColor,
+                      size: 21,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Text(
+                userName?.trim().isNotEmpty == true
+                    ? 'Halo, $userName'
+                    : 'Selamat datang',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AdvantaText.display.copyWith(
+                  color: textColor,
+                  fontSize: 28,
+                  letterSpacing: 0,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Active lot: ${selectedSample.lotId} | ${selectedSample.status}',
+                style: AdvantaText.body2.copyWith(
+                  color: highlight,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: _HeaderStat(
+                      label: 'Hybrid',
+                      value: selectedSample.hybrid,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _HeaderStat(
+                      label: 'Test',
+                      value: selectedSample.testType,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _HeaderStat(
+                      label: 'PIC',
+                      value: selectedSample.pic,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Traceable inspection, real-time input, and review-ready output.',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: AdvantaText.caption.copyWith(color: mutedColor),
+              ),
+            ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _HeaderStat extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _HeaderStat({
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = _gotFetIsDark(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: isDark
+            ? Colors.white.withAlpha(9)
+            : AdvantaColors.lightSurface.withAlpha(210),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _gotFetBorderColor(context)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(
-                width: 52,
-                height: 52,
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                padding: const EdgeInsets.all(2),
-                child: Image.asset(
-                  _GotFetAssets.appLogo,
-                  fit: BoxFit.contain,
-                  errorBuilder: (_, __, ___) => const Icon(
-                    Icons.fact_check_rounded,
-                    color: _GotFetUi.navy,
-                    size: 28,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'GOT & FET',
-                      style: AdvantaText.heading2.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      userName?.trim().isNotEmpty == true
-                          ? 'Selamat pagi, $userName'
-                          : 'Traceable. Accurate. Reliable.',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: AdvantaText.caption.copyWith(
-                        color: Colors.white.withAlpha(180),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const Icon(Icons.notifications_none_rounded, color: Colors.white),
-            ],
-          ),
-          const SizedBox(height: 18),
           Text(
-            'Digital GOT & FET',
-            style: AdvantaText.display.copyWith(
-              color: Colors.white,
-              fontSize: 30,
-              letterSpacing: 0,
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AdvantaText.caption.copyWith(
+              color: _gotFetMutedColor(context),
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 3),
           Text(
-            'Active lot: ${selectedSample.lotId} | ${selectedSample.status}',
-            style: AdvantaText.body2.copyWith(
-              color: const Color(0xFF55D98B),
-              fontWeight: FontWeight.w800,
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AdvantaText.caption.copyWith(
+              color: _gotFetTextColor(context),
+              fontWeight: FontWeight.w900,
             ),
           ),
         ],
@@ -1870,26 +2025,14 @@ class _PanelCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: isDark ? AdvantaColors.midGreen : Colors.white,
+        color: _gotFetCardColor(context),
         borderRadius: AdvantaRadius.cardRadius,
-        border: Border.all(
-          color:
-              isDark ? AdvantaColors.goldLight.withAlpha(36) : _GotFetUi.line,
-        ),
-        boxShadow: isDark
-            ? null
-            : [
-                BoxShadow(
-                  color: _GotFetUi.navy.withAlpha(10),
-                  blurRadius: 16,
-                  offset: const Offset(0, 6),
-                ),
-              ],
+        border: Border.all(color: _gotFetBorderColor(context)),
+        boxShadow: _gotFetShadow(context),
       ),
       child: child,
     );
@@ -1909,7 +2052,6 @@ class _ModuleStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return _PanelCard(
       child: Row(
         children: [
@@ -1924,7 +2066,7 @@ class _ModuleStrip extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: AdvantaText.heading3.copyWith(
-                    color: isDark ? AdvantaColors.goldLight : _GotFetUi.navy,
+                    color: _gotFetTextColor(context),
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -1934,9 +2076,7 @@ class _ModuleStrip extends StatelessWidget {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: AdvantaText.caption.copyWith(
-                    color: isDark
-                        ? AdvantaColors.goldLight.withAlpha(150)
-                        : AdvantaColors.mutedGrey,
+                    color: _gotFetMutedColor(context),
                   ),
                 ),
               ],
@@ -1959,24 +2099,24 @@ class _FeatureLogoTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(12),
+    return Container(
+      width: size,
+      height: size,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: _gotFetIsDark(context)
+            ? Colors.white.withAlpha(8)
+            : AdvantaColors.skySoft,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _gotFetBorderColor(context)),
+      ),
       child: Image.asset(
         asset,
-        width: size,
-        height: size,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => Container(
-          width: size,
-          height: size,
-          decoration: BoxDecoration(
-            color: _GotFetUi.green.withAlpha(24),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: const Icon(
-            Icons.image_not_supported_rounded,
-            color: _GotFetUi.greenDark,
-          ),
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => Icon(
+          Icons.image_not_supported_rounded,
+          color: _GotFetUi.greenDark,
+          size: size * .45,
         ),
       ),
     );
@@ -1998,21 +2138,19 @@ class _NavLogo extends StatelessWidget {
       scale: selected ? 1.08 : 1,
       duration: const Duration(milliseconds: 160),
       child: Container(
-        width: 27,
-        height: 27,
-        padding: const EdgeInsets.all(1),
+        width: 28,
+        height: 28,
+        padding: const EdgeInsets.all(2),
         decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(7),
+          color:
+              selected ? AdvantaColors.green.withAlpha(24) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
           border: Border.all(
             color: selected ? _GotFetUi.green : Colors.transparent,
-            width: 1.2,
+            width: 1,
           ),
         ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: Image.asset(asset, fit: BoxFit.cover),
-        ),
+        child: Image.asset(asset, fit: BoxFit.contain),
       ),
     );
   }
@@ -2034,7 +2172,7 @@ class _MetricGrid extends StatelessWidget {
           physics: const NeverScrollableScrollPhysics(),
           crossAxisSpacing: 10,
           mainAxisSpacing: 10,
-          childAspectRatio: crossAxisCount == 4 ? 2.15 : 1.55,
+          childAspectRatio: crossAxisCount == 4 ? 2.2 : 1.9,
           children: [
             for (final card in cards) _MetricCard(data: card),
           ],
@@ -2051,25 +2189,13 @@ class _MetricCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: isDark ? AdvantaColors.midGreen : Colors.white,
+        color: _gotFetCardColor(context),
         borderRadius: AdvantaRadius.cardRadius,
-        border: Border.all(
-          color:
-              isDark ? AdvantaColors.goldLight.withAlpha(36) : _GotFetUi.line,
-        ),
-        boxShadow: isDark
-            ? null
-            : [
-                BoxShadow(
-                  color: _GotFetUi.navy.withAlpha(9),
-                  blurRadius: 14,
-                  offset: const Offset(0, 6),
-                ),
-              ],
+        border: Border.all(color: _gotFetBorderColor(context)),
+        boxShadow: _gotFetShadow(context),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -2086,7 +2212,7 @@ class _MetricCard extends StatelessWidget {
                   data.value,
                   maxLines: 1,
                   style: AdvantaText.heading2.copyWith(
-                    color: isDark ? AdvantaColors.goldLight : data.color,
+                    color: _gotFetIsDark(context) ? Colors.white : data.color,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
@@ -2097,9 +2223,7 @@ class _MetricCard extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: AdvantaText.caption.copyWith(
-                  color: isDark
-                      ? AdvantaColors.goldLight.withAlpha(155)
-                      : AdvantaColors.mutedGrey,
+                  color: _gotFetMutedColor(context),
                 ),
               ),
             ],
@@ -2121,9 +2245,9 @@ class _MenuActionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _gotFetIsDark(context);
     return Material(
-      color: isDark ? AdvantaColors.midGreen : Colors.white,
+      color: _gotFetCardColor(context),
       borderRadius: AdvantaRadius.cardRadius,
       child: InkWell(
         onTap: onTap,
@@ -2132,60 +2256,51 @@ class _MenuActionCard extends StatelessWidget {
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             borderRadius: AdvantaRadius.cardRadius,
-            border: Border.all(
-              color: isDark
-                  ? AdvantaColors.goldLight.withAlpha(36)
-                  : _GotFetUi.line,
-            ),
-            boxShadow: isDark
-                ? null
-                : [
-                    BoxShadow(
-                      color: _GotFetUi.navy.withAlpha(8),
-                      blurRadius: 14,
-                      offset: const Offset(0, 5),
-                    ),
-                  ],
+            border: Border.all(color: _gotFetBorderColor(context)),
+            boxShadow: _gotFetShadow(context),
           ),
           child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               if (action.logoAsset == null)
                 Container(
-                  width: 42,
-                  height: 42,
+                  width: 44,
+                  height: 44,
                   decoration: BoxDecoration(
                     color: _GotFetUi.green.withAlpha(isDark ? 65 : 22),
-                    borderRadius: BorderRadius.circular(12),
+                    borderRadius: BorderRadius.circular(10),
                   ),
                   child: Icon(
                     action.icon,
-                    color:
-                        isDark ? AdvantaColors.goldLight : _GotFetUi.greenDark,
+                    color: isDark ? Colors.white : _GotFetUi.greenDark,
                   ),
                 )
               else
-                _FeatureLogoTile(asset: action.logoAsset!, size: 46),
-              const Spacer(),
+                _FeatureLogoTile(asset: action.logoAsset!, size: 48),
+              const SizedBox(height: 12),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  action.title,
+                  maxLines: 1,
+                  textAlign: TextAlign.center,
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _gotFetTextColor(context),
+                    fontSize: 14,
+                    height: 1.15,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 5),
               Text(
-                action.title,
+                action.subtitle,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 textAlign: TextAlign.center,
-                style: AdvantaText.bodyBold.copyWith(
-                  color: isDark ? AdvantaColors.goldLight : _GotFetUi.navy,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Text(
-                action.subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.center,
                 style: AdvantaText.caption.copyWith(
-                  color: isDark
-                      ? AdvantaColors.goldLight.withAlpha(150)
-                      : AdvantaColors.mutedGrey,
+                  color: _gotFetMutedColor(context),
+                  height: 1.2,
                 ),
               ),
             ],
@@ -2203,41 +2318,63 @@ class _WorkflowSummary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return _PanelCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Workflow Summary',
-            style: AdvantaText.heading3.copyWith(
-              color:
-                  isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
-            ),
-          ),
-          const SizedBox(height: 14),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                for (var i = 0; i < steps.length; i++) ...[
-                  _WorkflowNode(label: steps[i].$1, icon: steps[i].$2),
-                  if (i != steps.length - 1)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8),
-                      child: Icon(
-                        Icons.arrow_forward_rounded,
-                        color: isDark
-                            ? AdvantaColors.goldLight.withAlpha(150)
-                            : AdvantaColors.deepForest,
-                        size: 18,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 480;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Workflow Summary',
+                style: AdvantaText.heading3.copyWith(
+                  color: _gotFetTextColor(context),
+                ),
+              ),
+              const SizedBox(height: 14),
+              if (compact)
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: steps.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 4,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 10,
+                    childAspectRatio: 1.18,
+                  ),
+                  itemBuilder: (context, index) {
+                    return _WorkflowNode(
+                      label: steps[index].$1,
+                      icon: steps[index].$2,
+                    );
+                  },
+                )
+              else
+                Row(
+                  children: [
+                    for (var i = 0; i < steps.length; i++) ...[
+                      Expanded(
+                        child: _WorkflowNode(
+                          label: steps[i].$1,
+                          icon: steps[i].$2,
+                        ),
                       ),
-                    ),
-                ],
-              ],
-            ),
-          ),
-        ],
+                      if (i != steps.length - 1)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: Icon(
+                            Icons.arrow_forward_rounded,
+                            color: _gotFetMutedColor(context),
+                            size: 16,
+                          ),
+                        ),
+                    ],
+                  ],
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -2254,29 +2391,26 @@ class _WorkflowNode extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return SizedBox(
-      width: 74,
-      child: Column(
-        children: [
-          Icon(
-            icon,
-            color: isDark ? AdvantaColors.goldLight : const Color(0xFF061A44),
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(
+          icon,
+          color: _gotFetTextColor(context),
+          size: 22,
+        ),
+        const SizedBox(height: 6),
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: AdvantaText.caption.copyWith(
+            color: _gotFetTextColor(context),
+            fontWeight: FontWeight.w800,
           ),
-          const SizedBox(height: 6),
-          Text(
-            label,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: TextAlign.center,
-            style: AdvantaText.caption.copyWith(
-              color:
-                  isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
@@ -2292,7 +2426,7 @@ class _GuidanceBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _gotFetIsDark(context);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -2305,7 +2439,7 @@ class _GuidanceBanner extends StatelessWidget {
         text,
         textAlign: TextAlign.center,
         style: AdvantaText.bodyBold.copyWith(
-          color: isDark ? AdvantaColors.goldLight : _GotFetUi.greenDark,
+          color: isDark ? Colors.white : _GotFetUi.greenDark,
         ),
       ),
     );
@@ -2485,7 +2619,7 @@ class _IndicatorChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _gotFetIsDark(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -2502,8 +2636,7 @@ class _IndicatorChip extends StatelessWidget {
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: AdvantaText.caption.copyWith(
-                color:
-                    isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
+                color: _gotFetTextColor(context),
                 fontWeight: FontWeight.w900,
               ),
             ),
@@ -2527,24 +2660,20 @@ class _InfoRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Row(
       children: [
         Expanded(
           child: Text(
             label,
             style: AdvantaText.body2.copyWith(
-              color: isDark
-                  ? AdvantaColors.goldLight.withAlpha(165)
-                  : AdvantaColors.mutedGrey,
+              color: _gotFetMutedColor(context),
             ),
           ),
         ),
         Text(
           value,
           style: AdvantaText.bodyBold.copyWith(
-            color: valueColor ??
-                (isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest),
+            color: valueColor ?? _gotFetTextColor(context),
           ),
         ),
       ],
@@ -2565,7 +2694,6 @@ class _TimelineRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     final color = step.done ? AdvantaColors.success : AdvantaColors.mutedGrey;
 
     return IntrinsicHeight(
@@ -2607,18 +2735,14 @@ class _TimelineRow extends StatelessWidget {
                     child: Text(
                       step.label,
                       style: AdvantaText.bodyBold.copyWith(
-                        color: isDark
-                            ? AdvantaColors.goldLight
-                            : AdvantaColors.deepForest,
+                        color: _gotFetTextColor(context),
                       ),
                     ),
                   ),
                   Text(
                     dateTimeFormat.format(step.date),
                     style: AdvantaText.caption.copyWith(
-                      color: isDark
-                          ? AdvantaColors.goldLight.withAlpha(155)
-                          : AdvantaColors.mutedGrey,
+                      color: _gotFetMutedColor(context),
                     ),
                   ),
                 ],
@@ -2642,7 +2766,7 @@ class _StatusPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _gotFetIsDark(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -2654,7 +2778,7 @@ class _StatusPill extends StatelessWidget {
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
         style: AdvantaText.caption.copyWith(
-          color: isDark ? AdvantaColors.goldLight : color,
+          color: isDark ? Colors.white : color,
           fontWeight: FontWeight.w900,
         ),
       ),
@@ -2673,16 +2797,13 @@ class _MiniFact extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
           style: AdvantaText.caption.copyWith(
-            color: isDark
-                ? AdvantaColors.goldLight.withAlpha(145)
-                : AdvantaColors.mutedGrey,
+            color: _gotFetMutedColor(context),
           ),
         ),
         const SizedBox(height: 2),
@@ -2691,7 +2812,7 @@ class _MiniFact extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: AdvantaText.bodyBold.copyWith(
-            color: isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
+            color: _gotFetTextColor(context),
           ),
         ),
       ],
@@ -2714,7 +2835,6 @@ class _CounterRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
@@ -2723,8 +2843,7 @@ class _CounterRow extends StatelessWidget {
             child: Text(
               label,
               style: AdvantaText.body2.copyWith(
-                color:
-                    isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
+                color: _gotFetTextColor(context),
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -2740,8 +2859,7 @@ class _CounterRow extends StatelessWidget {
               '$value',
               textAlign: TextAlign.center,
               style: AdvantaText.bodyBold.copyWith(
-                color:
-                    isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
+                color: _gotFetTextColor(context),
               ),
             ),
           ),
@@ -2916,7 +3034,7 @@ class _FetPointGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _gotFetIsDark(context);
     return AspectRatio(
       aspectRatio: 10 / 5,
       child: GridView.builder(
@@ -2944,7 +3062,7 @@ class _FetPointGrid extends StatelessWidget {
                 statusLabel(status),
                 maxLines: 1,
                 style: AdvantaText.caption.copyWith(
-                  color: isDark ? AdvantaColors.goldLight : color,
+                  color: isDark ? Colors.white : color,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -2967,7 +3085,7 @@ class _LegendChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isDark = _gotFetIsDark(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
@@ -2986,8 +3104,7 @@ class _LegendChip extends StatelessWidget {
           Text(
             label,
             style: AdvantaText.caption.copyWith(
-              color:
-                  isDark ? AdvantaColors.goldLight : AdvantaColors.deepForest,
+              color: _gotFetTextColor(context),
               fontWeight: FontWeight.w800,
             ),
           ),

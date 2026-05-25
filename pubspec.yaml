@@ -29,4 +29,8 @@ flutter:
     - assets/logo_got_fet.png
     - assets/logo_got.png
     - assets/logo_fet.png
+    - assets/logo_got_fet_unbox.png
+    - assets/logo_got_unbox.png
+    - assets/logo_fet_unbox.png
+    - assets/background.png
     - .env
