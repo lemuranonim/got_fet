@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -9,6 +10,204 @@ class GotFetService {
   final SupabaseClient _supabase;
 
   static const evidenceBucket = 'got_fet_evidence';
+  static const samplesTable = 'got_fet_samples';
+  static const gotObservationTable = 'got_fet_got_observation';
+  static const fetObservationTable = 'got_fet_fet_observation';
+  static const photoEvidenceTable = 'got_fet_photo_evidence';
+  static const sampleTrackingTable = 'got_fet_sample_tracking';
+  static const reviewHistoryTable = 'got_fet_review_history';
+
+  Stream<List<Map<String, dynamic>>> watchSampleRows() {
+    return _supabase
+        .from(samplesTable)
+        .stream(primaryKey: ['batch']).order('batch');
+  }
+
+  Stream<List<Map<String, dynamic>>> watchReviewTimelineRows({
+    required String lotId,
+    required String sampleId,
+    required String module,
+  }) {
+    final trackingStream = _supabase
+        .from(sampleTrackingTable)
+        .stream(primaryKey: ['id'])
+        .eq('lot_id', lotId)
+        .order('event_datetime', ascending: false)
+        .map((rows) => [
+              for (final row in rows)
+                {
+                  ...Map<String, dynamic>.from(row),
+                  '_source': 'tracking',
+                },
+            ]);
+
+    final reviewStream = _supabase
+        .from(reviewHistoryTable)
+        .stream(primaryKey: ['id'])
+        .eq('sample_id', sampleId)
+        .order('review_datetime', ascending: false)
+        .map((rows) => [
+              for (final row in rows)
+                if (row['lot_id']?.toString() == lotId &&
+                    row['module']?.toString().toUpperCase() ==
+                        module.toUpperCase())
+                  {
+                    ...Map<String, dynamic>.from(row),
+                    '_source': 'review',
+                  },
+            ]);
+
+    return _combineTimelineStreams(trackingStream, reviewStream);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchSampleRows() async {
+    final response = await _supabase.from(samplesTable).select().order('batch');
+    return [
+      for (final row in response) Map<String, dynamic>.from(row),
+    ];
+  }
+
+  Future<void> updateSamplePlanning({
+    required String batch,
+    DateTime? plantingDate,
+    int? weekOfPlanting,
+    DateTime? resultEstimation,
+    int? weekOfResultEstimation,
+    String? noteTanam,
+    String? location,
+    double? fieldArea,
+    String? statusSample,
+  }) async {
+    await _supabase.from(samplesTable).update({
+      'planting_date': _dateOnly(plantingDate),
+      'week_of_planting': weekOfPlanting,
+      'result_estimation': _dateOnly(resultEstimation),
+      'week_of_result_estimation': weekOfResultEstimation,
+      'note_tanam': noteTanam,
+      'location': location,
+      'field_area': fieldArea,
+      'status_sample': statusSample,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }).eq('batch', batch);
+  }
+
+  Future<void> updateSampleStatus({
+    required String batch,
+    required String status,
+  }) async {
+    await _supabase.from(samplesTable).update({
+      'status_sample': status,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }).eq('batch', batch);
+  }
+
+  Stream<List<Map<String, dynamic>>> watchGotObservationRows({
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required String stage,
+  }) {
+    return _supabase
+        .from(gotObservationTable)
+        .stream(primaryKey: ['id'])
+        .eq('sample_id', sampleId)
+        .order('submitted_datetime', ascending: false)
+        .map((rows) {
+          final filteredRows = [
+            for (final row in rows)
+              if (row['lot_id']?.toString() == lotId &&
+                  row['plot_id']?.toString() == plotId &&
+                  row['observation_stage']?.toString() == stage)
+                Map<String, dynamic>.from(row),
+          ];
+          filteredRows.sort((a, b) {
+            final aDate = DateTime.tryParse(
+                  a['submitted_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            final bDate = DateTime.tryParse(
+                  b['submitted_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            return bDate.compareTo(aDate);
+          });
+          return filteredRows;
+        });
+  }
+
+  Future<Map<String, dynamic>?> fetchLatestGotObservation({
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required String stage,
+  }) async {
+    final response = await _supabase
+        .from(gotObservationTable)
+        .select()
+        .eq('lot_id', lotId)
+        .eq('sample_id', sampleId)
+        .eq('plot_id', plotId)
+        .eq('observation_stage', stage)
+        .order('submitted_datetime', ascending: false)
+        .limit(1);
+
+    if (response.isEmpty) return null;
+    return Map<String, dynamic>.from(response.first);
+  }
+
+  Stream<List<Map<String, dynamic>>> watchFetObservationRows({
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required int replication,
+  }) {
+    return _supabase
+        .from(fetObservationTable)
+        .stream(primaryKey: ['id'])
+        .eq('sample_id', sampleId)
+        .order('submitted_datetime', ascending: false)
+        .map((rows) {
+          final filteredRows = [
+            for (final row in rows)
+              if (row['lot_id']?.toString() == lotId &&
+                  row['plot_id']?.toString() == plotId &&
+                  row['replication']?.toString() == replication.toString())
+                Map<String, dynamic>.from(row),
+          ];
+          filteredRows.sort((a, b) {
+            final aDate = DateTime.tryParse(
+                  a['submitted_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            final bDate = DateTime.tryParse(
+                  b['submitted_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            return bDate.compareTo(aDate);
+          });
+          return filteredRows;
+        });
+  }
+
+  Future<Map<String, dynamic>?> fetchLatestFetObservation({
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required int replication,
+  }) async {
+    final response = await _supabase
+        .from(fetObservationTable)
+        .select()
+        .eq('lot_id', lotId)
+        .eq('sample_id', sampleId)
+        .eq('plot_id', plotId)
+        .eq('replication', replication)
+        .order('submitted_datetime', ascending: false)
+        .limit(1);
+
+    if (response.isEmpty) return null;
+    return Map<String, dynamic>.from(response.first);
+  }
 
   Future<void> submitGotObservation({
     required String lotId,
@@ -34,7 +233,7 @@ class GotFetService {
       module: 'got',
     );
 
-    await _supabase.from('got_fet_got_observation').insert({
+    final payload = {
       'lot_id': lotId,
       'sample_id': sampleId,
       'hybrid': hybrid,
@@ -52,7 +251,36 @@ class GotFetService {
       'submitted_datetime': submittedAt,
       'review_status': 'Submitted',
       'created_by_user_id': _supabase.auth.currentUser?.id,
-    });
+    };
+
+    final existing = await fetchLatestGotObservation(
+      lotId: lotId,
+      sampleId: sampleId,
+      plotId: plotId,
+      stage: stage,
+    );
+
+    if (existing == null) {
+      await _supabase.from(gotObservationTable).insert(payload);
+    } else {
+      final existingId = existing['id'];
+      final update = Map<String, dynamic>.from(payload)
+        ..remove('created_by_user_id');
+      if (existingId != null) {
+        await _supabase
+            .from(gotObservationTable)
+            .update(update)
+            .eq('id', existingId);
+      } else {
+        await _supabase
+            .from(gotObservationTable)
+            .update(update)
+            .eq('lot_id', lotId)
+            .eq('sample_id', sampleId)
+            .eq('plot_id', plotId)
+            .eq('observation_stage', stage);
+      }
+    }
 
     await _insertPhotoEvidence(
       lotId: lotId,
@@ -102,7 +330,7 @@ class GotFetService {
             replication: 'u$replication',
           );
 
-    await _supabase.from('got_fet_fet_observation').insert({
+    final payload = {
       'lot_id': lotId,
       'sample_id': sampleId,
       'hybrid': hybrid,
@@ -125,7 +353,13 @@ class GotFetService {
       'submitted_datetime': submittedAt,
       'review_status': 'Submitted',
       'created_by_user_id': _supabase.auth.currentUser?.id,
-    });
+      'updated_at': submittedAt,
+    };
+
+    await _supabase.from(fetObservationTable).upsert(
+          payload,
+          onConflict: 'lot_id,sample_id,plot_id,replication',
+        );
 
     await _insertPhotoEvidence(
       lotId: lotId,
@@ -194,6 +428,139 @@ class GotFetService {
     );
   }
 
+  Stream<List<Map<String, dynamic>>> watchGotEvidenceRows({
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required String stage,
+  }) {
+    return _supabase
+        .from(photoEvidenceTable)
+        .stream(primaryKey: ['id'])
+        .eq('sample_id', sampleId)
+        .order('uploaded_datetime', ascending: false)
+        .map((rows) {
+          final filteredRows = [
+            for (final row in rows)
+              if (row['lot_id']?.toString() == lotId &&
+                  row['module']?.toString().toLowerCase() == 'got' &&
+                  row['plot_id']?.toString() == plotId &&
+                  row['observation_stage']?.toString() == stage)
+                Map<String, dynamic>.from(row),
+          ];
+          filteredRows.sort((a, b) {
+            final aDate = DateTime.tryParse(
+                  a['uploaded_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            final bDate = DateTime.tryParse(
+                  b['uploaded_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            return bDate.compareTo(aDate);
+          });
+          return filteredRows;
+        });
+  }
+
+  Future<void> saveGotEvidencePhoto({
+    required File file,
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required String stage,
+    required String category,
+    required int rcvNo,
+    required String rcvLabel,
+    required String uploadedBy,
+  }) async {
+    final uploadedAt = DateTime.now().toUtc().toIso8601String();
+    if (!file.existsSync()) {
+      throw const GotFetStorageException(
+        'File foto tidak ditemukan di perangkat setelah capture.',
+      );
+    }
+    if (file.lengthSync() == 0) {
+      throw const GotFetStorageException(
+        'File foto kosong, silakan capture ulang.',
+      );
+    }
+
+    final uploadedPath = await _uploadEvidencePhoto(
+      file: file,
+      lotId: lotId,
+      module: 'got',
+      stage: stage,
+      category: category,
+      replication: rcvLabel,
+    );
+    final photoUrl =
+        _supabase.storage.from(evidenceBucket).getPublicUrl(uploadedPath);
+    final payload = {
+      'lot_id': lotId,
+      'sample_id': sampleId,
+      'test_type': 'GOT',
+      'module': 'got',
+      'plot_id': plotId,
+      'replication': rcvLabel,
+      'observation_stage': stage,
+      'evidence_category': category,
+      'rcv_no': rcvNo,
+      'rcv_label': rcvLabel,
+      'storage_path': uploadedPath,
+      'photo_url': photoUrl,
+      'uploaded_by': uploadedBy,
+      'uploaded_datetime': uploadedAt,
+      'review_status': 'Submitted',
+      'created_by_user_id': _supabase.auth.currentUser?.id,
+      'updated_at': uploadedAt,
+    };
+
+    try {
+      final existing = await _supabase
+          .from(photoEvidenceTable)
+          .select('id')
+          .eq('lot_id', lotId)
+          .eq('sample_id', sampleId)
+          .eq('module', 'got')
+          .eq('plot_id', plotId)
+          .eq('observation_stage', stage)
+          .eq('evidence_category', category)
+          .eq('rcv_no', rcvNo)
+          .limit(1);
+
+      if (existing.isEmpty) {
+        await _supabase.from(photoEvidenceTable).insert(payload);
+        return;
+      }
+
+      final existingId = existing.first['id'];
+      if (existingId == null) {
+        await _supabase
+            .from(photoEvidenceTable)
+            .update(payload)
+            .eq('lot_id', lotId)
+            .eq('sample_id', sampleId)
+            .eq('module', 'got')
+            .eq('plot_id', plotId)
+            .eq('observation_stage', stage)
+            .eq('evidence_category', category)
+            .eq('rcv_no', rcvNo);
+        return;
+      }
+
+      await _supabase
+          .from(photoEvidenceTable)
+          .update(payload)
+          .eq('id', existingId as Object);
+    } catch (error) {
+      throw GotFetStorageException(
+        'Foto sudah terupload ke Storage, tapi metadata gagal disimpan ke tabel $photoEvidenceTable. '
+        'Pastikan schema/policy tabel evidence sudah dijalankan. Detail: ${_errorMessage(error)}',
+      );
+    }
+  }
+
   Future<List<String>> uploadEvidencePhotos({
     required Iterable<File> files,
     required String lotId,
@@ -231,24 +598,94 @@ class GotFetService {
     });
   }
 
+  Stream<List<Map<String, dynamic>>> _combineTimelineStreams(
+    Stream<List<Map<String, dynamic>>> trackingStream,
+    Stream<List<Map<String, dynamic>>> reviewStream,
+  ) {
+    late final StreamController<List<Map<String, dynamic>>> controller;
+    StreamSubscription<List<Map<String, dynamic>>>? trackingSubscription;
+    StreamSubscription<List<Map<String, dynamic>>>? reviewSubscription;
+    var trackingRows = <Map<String, dynamic>>[];
+    var reviewRows = <Map<String, dynamic>>[];
+
+    void emit() {
+      if (controller.isClosed) return;
+      final rows = [...trackingRows, ...reviewRows];
+      rows.sort((a, b) {
+        final aDate = DateTime.tryParse(
+              (a['event_datetime'] ?? a['review_datetime'])?.toString() ?? '',
+            ) ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        final bDate = DateTime.tryParse(
+              (b['event_datetime'] ?? b['review_datetime'])?.toString() ?? '',
+            ) ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        return bDate.compareTo(aDate);
+      });
+      controller.add(rows);
+    }
+
+    controller = StreamController<List<Map<String, dynamic>>>(
+      onListen: () {
+        trackingSubscription = trackingStream.listen(
+          (rows) {
+            trackingRows = rows;
+            emit();
+          },
+          onError: controller.addError,
+        );
+        reviewSubscription = reviewStream.listen(
+          (rows) {
+            reviewRows = rows;
+            emit();
+          },
+          onError: controller.addError,
+        );
+      },
+      onCancel: () async {
+        await trackingSubscription?.cancel();
+        await reviewSubscription?.cancel();
+      },
+    );
+
+    return controller.stream;
+  }
+
   Future<String> _uploadEvidencePhoto({
     required File file,
     required String lotId,
     required String module,
+    String? stage,
+    String? category,
     String? replication,
   }) async {
     final safeLotId = _safeSegment(lotId);
     final safeModule = _safeSegment(module);
+    final safeStage = _safeSegment(stage ?? 'main');
+    final safeCategory = _safeSegment(category ?? 'general');
     final safeReplication = _safeSegment(replication ?? 'main');
     final extension = _fileExtension(file.path);
+    final contentType = _contentTypeForExtension(extension);
     final fileName = '${DateTime.now().microsecondsSinceEpoch}.$extension';
-    final objectPath = '$safeLotId/$safeModule/$safeReplication/$fileName';
+    final objectPath =
+        '$safeLotId/$safeModule/$safeStage/$safeCategory/$safeReplication/$fileName';
 
-    await _supabase.storage.from(evidenceBucket).upload(
-          objectPath,
-          file,
-          fileOptions: const FileOptions(upsert: true),
-        );
+    try {
+      await _supabase.storage.from(evidenceBucket).upload(
+            objectPath,
+            file,
+            fileOptions: FileOptions(
+              upsert: true,
+              contentType: contentType,
+            ),
+          );
+    } catch (error) {
+      throw GotFetStorageException(
+        'Upload foto ke bucket "$evidenceBucket" gagal. '
+        'Pastikan bucket Storage, MIME type image, dan policy upload sudah aktif. '
+        'Detail: ${_errorMessage(error)}',
+      );
+    }
 
     return objectPath;
   }
@@ -266,7 +703,7 @@ class GotFetService {
   }) async {
     if (photoUrls.isEmpty) return;
 
-    await _supabase.from('got_fet_photo_evidence').insert([
+    await _supabase.from(photoEvidenceTable).insert([
       for (final url in photoUrls)
         {
           'lot_id': lotId,
@@ -294,4 +731,33 @@ class GotFetService {
     if (dotIndex == -1 || dotIndex == name.length - 1) return 'jpg';
     return name.substring(dotIndex + 1).toLowerCase();
   }
+
+  String _contentTypeForExtension(String extension) {
+    return switch (extension.toLowerCase()) {
+      'png' => 'image/png',
+      'webp' => 'image/webp',
+      'jpeg' || 'jpg' => 'image/jpeg',
+      _ => 'image/jpeg',
+    };
+  }
+
+  String _errorMessage(Object error) {
+    if (error is StorageException) return error.message;
+    if (error is PostgrestException) return error.message;
+    return error.toString().replaceFirst('Exception: ', '').trim();
+  }
+
+  String? _dateOnly(DateTime? value) {
+    if (value == null) return null;
+    return value.toIso8601String().split('T').first;
+  }
+}
+
+class GotFetStorageException implements Exception {
+  final String message;
+
+  const GotFetStorageException(this.message);
+
+  @override
+  String toString() => message;
 }

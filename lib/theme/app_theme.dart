@@ -286,15 +286,66 @@ class AdvantaTheme {
             ? AdvantaColors.green.withAlpha(38)
             : AdvantaColors.greenSoft,
         surfaceTintColor: Colors.transparent,
+        iconTheme: WidgetStateProperty.resolveWith(
+          (states) {
+            final selected = states.contains(WidgetState.selected);
+            return IconThemeData(
+              color: selected
+                  ? (isDark ? Colors.white : AdvantaColors.greenDark)
+                  : (isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy),
+              size: selected ? 27 : 25,
+            );
+          },
+        ),
         labelTextStyle: WidgetStateProperty.resolveWith(
           (states) => AdvantaText.caption.copyWith(
             color: states.contains(WidgetState.selected)
-                ? AdvantaColors.green
+                ? (isDark ? AdvantaColors.lightGreen : AdvantaColors.greenDark)
                 : muted,
             fontWeight: states.contains(WidgetState.selected)
                 ? FontWeight.w900
                 : FontWeight.w700,
           ),
+        ),
+      ),
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: ButtonStyle(
+          foregroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.disabled)) {
+              return muted.withAlpha(150);
+            }
+            if (states.contains(WidgetState.selected)) {
+              return isDark ? Colors.white : AdvantaColors.navy;
+            }
+            return isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy;
+          }),
+          iconColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.disabled)) {
+              return muted.withAlpha(150);
+            }
+            if (states.contains(WidgetState.selected)) {
+              return isDark ? Colors.white : AdvantaColors.greenDark;
+            }
+            return isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy;
+          }),
+          textStyle: WidgetStatePropertyAll(AdvantaText.bodyBold),
+          backgroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) {
+              return isDark
+                  ? AdvantaColors.green.withAlpha(46)
+                  : AdvantaColors.greenSoft;
+            }
+            return Colors.transparent;
+          }),
+          side: WidgetStateProperty.resolveWith((states) {
+            final selected = states.contains(WidgetState.selected);
+            return BorderSide(
+              color: selected
+                  ? AdvantaColors.green.withAlpha(isDark ? 165 : 115)
+                  : outline,
+              width: selected ? 1.4 : 1,
+            );
+          }),
         ),
       ),
       textTheme: TextTheme(

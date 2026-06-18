@@ -1,16 +1,31 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:camera/camera.dart' as camera;
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:sensors_plus/sensors_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../services/got_fet_service.dart';
 import '../../services/session_manager.dart';
 import '../../theme/app_theme.dart';
 import '../../theme/theme_controller.dart';
 import '../../widgets/got_fet_loading.dart';
+
+part 'got_fet_batch_actions.dart';
+part 'got_fet_batch_list.dart';
+part 'got_fet_camera.dart';
+part 'got_fet_models.dart';
+part 'got_fet_photo_pipeline.dart';
 
 class _GotFetUi {
   static const navy = AdvantaColors.navy;
@@ -66,15 +81,28 @@ List<BoxShadow>? _gotFetShadow(BuildContext context) => _gotFetIsDark(context)
 enum _GotFetPage {
   home,
   lotTracking,
+  gotPlantingData,
+  gotWorkspace,
   gotPhoto,
   gotInput,
+  fetWorkspace,
   fetPhoto,
   fetAnalysis,
   fetInput,
   review,
+  gotReview,
+  fetReview,
 }
 
 enum _FetPointStatus { grown, notGrown, review, notReadable }
+
+enum _GotObservationStage { vegetative, finalGenerative }
+
+enum _InspectionModule { got, fet }
+
+const _fetGridColumns = 10;
+const _fetGridRows = 10;
+const _fetGridPointCount = _fetGridColumns * _fetGridRows;
 
 class GotFetScreen extends StatefulWidget {
   const GotFetScreen({super.key});
@@ -84,58 +112,201 @@ class GotFetScreen extends StatefulWidget {
 }
 
 class _GotFetScreenState extends State<GotFetScreen> {
+  static const _batchListPageSize = 20;
+  static const _gotPlotId = 'G1 - U1';
+
+  static const _gotLocationOptions = ['Malang', 'Tulungagung', 'Pasuruan'];
+  static const _gotFieldAreaOptions = [0.009, 0.010, 0.012, 0.015, 0.020];
+  static const _gotNoteTanamOptions = ['On Process', 'Done', 'Resampling'];
+  static const _gotStatusSampleOptions = [
+    'Fresh',
+    'Resample 1',
+    'Resample 2',
+  ];
+
   final _gotFetService = GotFetService();
   final _imagePicker = ImagePicker();
+  final _photoPipeline = _SmartPhotoPipeline();
   final _dateFormat = DateFormat('dd MMM yyyy');
   final _dateTimeFormat = DateFormat('dd MMM yyyy HH:mm');
   final _gotNoteController = TextEditingController();
   final _fetNoteController = TextEditingController();
-  final List<File> _gotEvidencePhotos = [];
+  final _gotTotalObservedController = TextEditingController(text: '0');
+  final _gotOffTypeController = TextEditingController(text: '0');
+  final _gotSelfingController = TextEditingController(text: '0');
+  final _gotMaleController = TextEditingController(text: '0');
+  final _gotSuspiciousController = TextEditingController(text: '0');
+  final _selectedSampleIndexNotifier = ValueNotifier<int>(0);
 
-  late final List<_GotFetSample> _samples;
+  List<_GotFetSample> _samples = [];
   late List<_FetPointStatus> _replicationOne;
   late List<_FetPointStatus> _replicationTwo;
+  final List<_GotFetNavEntry> _pageHistory = [];
+  StreamSubscription<List<Map<String, dynamic>>>? _sampleSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _gotObservationSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _gotEvidenceSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _fetObservationSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _reviewTimelineSubscription;
 
   ActiveSession? _session;
-  File? _fetPlotPhoto;
   _GotFetPage _page = _GotFetPage.home;
+  _InspectionModule _activeModule = _InspectionModule.got;
   int _selectedSampleIndex = 0;
   int _selectedReplication = 1;
   int _reviewSegment = 0;
+  int _batchListVisibleCount = _batchListPageSize;
   bool _isSyncing = false;
+  bool _selectionRebuildQueued = false;
+  _GotObservationStage _gotObservationStage = _GotObservationStage.vegetative;
 
-  int _gotTotalObserved = 100;
-  int _gotOffType = 3;
-  int _gotSelfing = 2;
-  int _gotMale = 1;
-  int _gotSuspicious = 2;
+  int _gotTotalObserved = 0;
+  int _gotOffType = 0;
+  int _gotSelfing = 0;
+  int _gotMale = 0;
+  int _gotSuspicious = 0;
+  bool _isLoadingSamples = true;
+  bool _isLoadingGotObservation = false;
+  bool _isLoadingGotEvidence = false;
+  bool _hasPersistedGotObservation = false;
+  bool _gotObservationSyncQueued = false;
+  bool _gotEvidenceSyncQueued = false;
+  bool _fetObservationSyncQueued = false;
+  bool _reviewTimelineSyncQueued = false;
+  bool _isRetryingPhotoQueue = false;
+  String? _sampleLoadError;
+  String? _gotObservationLoadError;
+  String? _gotEvidenceLoadError;
+  String? _gotObservationWatchKey;
+  String? _gotEvidenceWatchKey;
+  String? _fetObservationWatchKey;
+  String? _reviewTimelineWatchKey;
+  String? _syncingGotEvidenceSlotKey;
+  String? _reviewTimelineLoadError;
+  Map<String, _GotEvidencePhoto> _gotEvidenceBySlot = {};
+  List<_ReviewTimelineEvent> _reviewTimelineEvents = [];
+  final Map<int, File> _fetPlotPhotosByReplication = {};
+  final Map<int, _SmartPhotoMetadata> _fetPlotMetadataByReplication = {};
+  _FetObservationResult? _latestFetObservation;
+  _SmartPhotoStatus _smartPhotoStatus = const _SmartPhotoStatus();
 
   @override
   void initState() {
     super.initState();
     _loadSession();
-    _samples = _seedSamples();
-    _replicationOne = _seedFetPoints(
-      notGrownIndexes: const [6, 13, 24, 39],
-      reviewIndexes: const [17],
-    );
-    _replicationTwo = _seedFetPoints(
-      notGrownIndexes: const [4, 15, 28, 42, 46],
-      reviewIndexes: const [],
-    );
+    _loadSamplesFromDatabase();
+    unawaited(_initializeSmartPhotoPipeline());
+    _replicationOne = _initialFetPoints();
+    _replicationTwo = _initialFetPoints();
   }
 
   @override
   void dispose() {
+    _sampleSubscription?.cancel();
+    _gotObservationSubscription?.cancel();
+    _gotEvidenceSubscription?.cancel();
+    _fetObservationSubscription?.cancel();
+    _reviewTimelineSubscription?.cancel();
     _gotNoteController.dispose();
     _fetNoteController.dispose();
+    _gotTotalObservedController.dispose();
+    _gotOffTypeController.dispose();
+    _gotSelfingController.dispose();
+    _gotMaleController.dispose();
+    _gotSuspiciousController.dispose();
+    _selectedSampleIndexNotifier.dispose();
     super.dispose();
   }
 
+  Future<void> _initializeSmartPhotoPipeline() async {
+    try {
+      await _photoPipeline.initialize();
+      await _refreshSmartPhotoStatus();
+      await _drainSmartPhotoQueue();
+    } catch (_) {
+      await _refreshSmartPhotoStatus();
+    }
+  }
+
+  Future<void> _refreshSmartPhotoStatus() async {
+    final status = await _photoPipeline.status();
+    if (!mounted) return;
+    setState(() => _smartPhotoStatus = status);
+  }
+
+  Future<void> _drainSmartPhotoQueue({bool showResult = false}) async {
+    if (_isRetryingPhotoQueue) return;
+    setState(() => _isRetryingPhotoQueue = true);
+    try {
+      final synced = await _photoPipeline.syncPendingGotEvidence(
+        _gotFetService,
+      );
+      await _refreshSmartPhotoStatus();
+      if (!mounted || !showResult) return;
+      _showSnack(
+        synced == 0
+            ? 'Belum ada foto offline yang berhasil disync.'
+            : '$synced foto offline berhasil disync.',
+      );
+    } catch (error) {
+      await _refreshSmartPhotoStatus();
+      if (!mounted || !showResult) return;
+      _showSnack('Sync foto offline belum berhasil: ${_friendlyError(error)}');
+    } finally {
+      if (mounted) setState(() => _isRetryingPhotoQueue = false);
+    }
+  }
+
+  bool get _hasSamples => _samples.isNotEmpty;
+
   _GotFetSample get _selectedSample => _samples[_selectedSampleIndex];
+
+  String get _activeModuleCode =>
+      _activeModule == _InspectionModule.got ? 'GOT' : 'FET';
+
+  String get _activeModuleTitle => _activeModule == _InspectionModule.got
+      ? 'Grow Out Test'
+      : 'Field Emergence Test';
+
+  String get _activeModuleSubtitle => _activeModule == _InspectionModule.got
+      ? 'Fitur tanam, foto evidence, vegetatif, generative, dan review GOT'
+      : 'Fitur plot scanner, analisa titik tanam, input, dan review FET';
+
+  String get _activeModuleLogo => _activeModule == _InspectionModule.got
+      ? _GotFetAssets.gotLogo
+      : _GotFetAssets.fetLogo;
+
+  ({int overdue, int pending, int review, int approved}) get _sampleSummary {
+    var overdue = 0;
+    var pending = 0;
+    var review = 0;
+    var approved = 0;
+
+    for (final sample in _samples) {
+      final status = sample.status.toLowerCase();
+      if (sample.isOverdue) overdue++;
+      if (!_sampleObservationDone(sample)) pending++;
+      if (status.contains('review') || status.contains('revision')) review++;
+      if (_sampleFinalConfirmed(sample)) approved++;
+    }
+
+    return (
+      overdue: overdue,
+      pending: pending,
+      review: review,
+      approved: approved,
+    );
+  }
 
   List<_FetPointStatus> get _currentReplication =>
       _selectedReplication == 1 ? _replicationOne : _replicationTwo;
+
+  String get _fetPlotId => 'F1 - U$_selectedReplication';
+
+  File? get _currentFetPlotPhoto =>
+      _fetPlotPhotosByReplication[_selectedReplication];
+
+  _SmartPhotoMetadata? get _currentFetPlotPhotoMetadata =>
+      _fetPlotMetadataByReplication[_selectedReplication];
 
   int get _gotConfirmedIssueCount => _gotOffType + _gotSelfing + _gotMale;
 
@@ -147,21 +318,133 @@ class _GotFetScreenState extends State<GotFetScreen> {
   double get _gotPurity =>
       _gotTotalObserved == 0 ? 0 : (_gotTrueType / _gotTotalObserved) * 100;
 
-  int get _fetTotalGrown =>
-      _countStatus(_replicationOne, _FetPointStatus.grown) +
-      _countStatus(_replicationTwo, _FetPointStatus.grown);
+  ({String label, double threshold})? get _gotPassFailRule {
+    final sample = _selectedSample;
+    final productSource = _normalizeRuleText(
+      '${sample.category} ${sample.processStage} ${sample.reasonTesting} ${sample.testType}',
+    );
+    final typeSource =
+        _normalizeRuleText('${sample.typeSeed} ${sample.category}');
+    final genderSource = _normalizeRuleText(
+        '${sample.gender} ${sample.typeSeed} ${sample.category}');
+    final allSource = _normalizeRuleText(
+      '$productSource $typeSource $genderSource',
+    );
 
-  int get _fetTotalNotGrown =>
-      _countStatus(_replicationOne, _FetPointStatus.notGrown) +
-      _countStatus(_replicationTwo, _FetPointStatus.notGrown);
+    if (_containsRuleTerm(productSource, const [
+      'ps',
+      'parent seed',
+      'parent stock',
+    ])) {
+      if (_containsRuleTerm(genderSource, const ['male', 'jantan'])) {
+        return (label: 'PS Male', threshold: 100);
+      }
+      if (_containsRuleTerm(genderSource, const ['female', 'betina'])) {
+        return (label: 'PS Female', threshold: 99.95);
+      }
+    }
 
-  int get _fetTotalReview =>
-      _countStatus(_replicationOne, _FetPointStatus.review) +
-      _countStatus(_replicationTwo, _FetPointStatus.review);
+    final isCommercial = _containsRuleTerm(productSource, const [
+      'commercial',
+      'komersial',
+      'komersil',
+      'cs',
+    ]);
+    final isManis = _containsRuleTerm(typeSource, const [
+      'manis',
+      'sweet',
+      'sweet corn',
+    ]);
+    final isAtos = _containsRuleTerm(typeSource, const [
+      'atos',
+      'field corn',
+      'fieldcorn',
+      'grain',
+      'dent',
+    ]);
 
-  int get _fetTotalNotReadable =>
-      _countStatus(_replicationOne, _FetPointStatus.notReadable) +
-      _countStatus(_replicationTwo, _FetPointStatus.notReadable);
+    if (isCommercial || isManis || isAtos) {
+      if (isManis) return (label: 'Komersil Manis', threshold: 97);
+      if (isAtos) return (label: 'Komersil Atos', threshold: 95);
+    }
+
+    if (_containsRuleTerm(allSource, const ['male', 'jantan'])) {
+      return (label: 'PS Male', threshold: 100);
+    }
+    if (_containsRuleTerm(allSource, const ['female', 'betina'])) {
+      return (label: 'PS Female', threshold: 99.95);
+    }
+
+    return null;
+  }
+
+  String get _gotPassFailReference {
+    final rule = _gotPassFailRule;
+    if (rule == null) return 'Acuan belum terdeteksi dari Master Data';
+    return '${rule.label} >= ${_formatPercent(rule.threshold)}%';
+  }
+
+  String get _gotResultLabel {
+    if (_gotTotalObserved <= 0) return 'PENDING';
+    if (!_gotCountsValid) return 'FAIL';
+    final rule = _gotPassFailRule;
+    if (rule == null) return 'PENDING';
+    return _gotPurity >= rule.threshold ? 'PASS' : 'FAIL';
+  }
+
+  Color get _gotResultColor {
+    return switch (_gotResultLabel) {
+      'PASS' => AdvantaColors.success,
+      'FAIL' => AdvantaColors.error,
+      _ => AdvantaColors.gold,
+    };
+  }
+
+  String get _gotEvidenceProgressText {
+    final slots = _gotEvidenceSlots;
+    if (slots.isEmpty) return 'Belum ada slot evidence';
+    final filledCount = [
+      for (final slot in slots)
+        if (_gotEvidenceBySlot.containsKey(slot.key)) slot,
+    ].length;
+    return '$filledCount/${slots.length} slot terisi';
+  }
+
+  double get _gotOffTypePercent => _gotPercent(_gotOffType);
+
+  double get _gotSelfingPercent => _gotPercent(_gotSelfing);
+
+  double get _gotMalePercent => _gotPercent(_gotMale);
+
+  String get _gotObservationStageLabel {
+    return switch (_gotObservationStage) {
+      _GotObservationStage.vegetative => 'Vegetatif',
+      _GotObservationStage.finalGenerative => 'Generative',
+    };
+  }
+
+  String get _gotObservationStagePayload {
+    return switch (_gotObservationStage) {
+      _GotObservationStage.vegetative => 'Vegetative',
+      _GotObservationStage.finalGenerative => 'Final Generative',
+    };
+  }
+
+  String get _gotObservationNumber {
+    return switch (_gotObservationStage) {
+      _GotObservationStage.vegetative =>
+        _selectedSample.vegetativeObservationNo ?? '-',
+      _GotObservationStage.finalGenerative =>
+        _selectedSample.finalObservationNo ?? '-',
+    };
+  }
+
+  String get _gotStatusColumnLabel {
+    return switch (_gotObservationStage) {
+      _GotObservationStage.vegetative => 'Status GOT Veg',
+      _GotObservationStage.finalGenerative => 'Status GOT Generative',
+    };
+  }
 
   int get _currentReplicationGrown =>
       _countStatus(_currentReplication, _FetPointStatus.grown);
@@ -175,13 +458,104 @@ class _GotFetScreenState extends State<GotFetScreen> {
   int get _currentReplicationNotReadable =>
       _countStatus(_currentReplication, _FetPointStatus.notReadable);
 
-  double get _fetEmergence => (_fetTotalGrown / 100) * 100;
-
   double get _currentReplicationEmergence =>
       (_currentReplicationGrown / _currentReplication.length) * 100;
 
   bool get _currentReplicationHasOpenItems =>
       _currentReplicationReview + _currentReplicationNotReadable > 0;
+
+  String get _fetResultLabel =>
+      _currentReplicationHasOpenItems ? 'FAIL' : 'PASS';
+
+  Color get _fetResultColor =>
+      _fetResultLabel == 'PASS' ? AdvantaColors.success : AdvantaColors.error;
+
+  List<_FetPointStatus> _fetPointsForReplication(int replication) {
+    return replication == 1 ? _replicationOne : _replicationTwo;
+  }
+
+  int _fetOpenItemsForReplication(int replication) {
+    final points = _fetPointsForReplication(replication);
+    return _countStatus(points, _FetPointStatus.review) +
+        _countStatus(points, _FetPointStatus.notReadable);
+  }
+
+  double _fetEmergenceForReplication(int replication) {
+    final points = _fetPointsForReplication(replication);
+    if (points.isEmpty) return 0;
+    return (_countStatus(points, _FetPointStatus.grown) / points.length) * 100;
+  }
+
+  bool _fetPhotoReadyForReplication(int replication) {
+    return _fetPlotPhotosByReplication[replication] != null ||
+        (_selectedReplication == replication &&
+            _latestFetObservation?.plotPhotoUrl != null);
+  }
+
+  bool _fetSubmittedForReplication(int replication) {
+    return _selectedReplication == replication && _latestFetObservation != null;
+  }
+
+  bool get _gotPlanningReady {
+    return _selectedSample.plantingDate != null &&
+        _selectedSample.location != '-' &&
+        _selectedSample.fieldArea != null;
+  }
+
+  bool get _gotInputReady =>
+      _hasPersistedGotObservation || _gotTotalObserved > 0;
+
+  int get _gotEvidenceFilledCount {
+    return [
+      for (final slot in _gotEvidenceSlots)
+        if (_gotEvidenceBySlot.containsKey(slot.key)) slot,
+    ].length;
+  }
+
+  bool get _gotEvidenceReady {
+    final slots = _gotEvidenceSlots;
+    return slots.isNotEmpty && _gotEvidenceFilledCount == slots.length;
+  }
+
+  bool get _selectedSampleSubmittedOrReviewed {
+    return _sampleObservationDone(_selectedSample);
+  }
+
+  bool get _fetPhotoReady {
+    return _currentFetPlotPhoto != null ||
+        _latestFetObservation?.plotPhotoUrl != null;
+  }
+
+  bool get _fetCheckReady => !_currentReplicationHasOpenItems;
+
+  bool get _fetSubmittedReady => _latestFetObservation != null;
+
+  bool _sampleObservationDone(_GotFetSample sample) {
+    final status = sample.status.toLowerCase();
+    return status.contains('submit') ||
+        status.contains('approved') ||
+        status.contains('confirmed') ||
+        status.contains('complete') ||
+        status.contains('done') ||
+        status.contains('reject') ||
+        status.contains('revision');
+  }
+
+  bool _sampleFinalConfirmed(_GotFetSample sample) {
+    final status = sample.status.toLowerCase();
+    return status.contains('approved') ||
+        status.contains('confirmed') ||
+        status.contains('complete') ||
+        status.contains('done');
+  }
+
+  String _sampleObservationLabel(_GotFetSample sample) =>
+      _sampleObservationDone(sample) ? 'Done' : 'Pending';
+
+  Color _sampleObservationColor(_GotFetSample sample) =>
+      _sampleObservationDone(sample)
+          ? AdvantaColors.success
+          : AdvantaColors.gold;
 
   Future<void> _loadSession() async {
     final session = await SessionManager.instance.getActiveSession();
@@ -189,8 +563,733 @@ class _GotFetScreenState extends State<GotFetScreen> {
     setState(() => _session = session);
   }
 
-  void _openPage(_GotFetPage page) {
-    setState(() => _page = page);
+  Future<void> _loadSamplesFromDatabase() async {
+    setState(() {
+      _isLoadingSamples = true;
+      _sampleLoadError = null;
+    });
+
+    try {
+      await _sampleSubscription?.cancel();
+      _sampleSubscription = _gotFetService.watchSampleRows().listen(
+        _applySampleRows,
+        onError: (Object error) {
+          if (!mounted) return;
+          setState(() {
+            _sampleLoadError = _friendlyError(error);
+            _isLoadingSamples = false;
+          });
+        },
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _samples = [];
+        _selectedSampleIndex = 0;
+        _isLoadingSamples = false;
+        _sampleLoadError = _friendlyError(error);
+      });
+    }
+  }
+
+  void _applySampleRows(List<Map<String, dynamic>> rows) {
+    final samples = [
+      for (final row in rows) _sampleFromRow(row),
+    ];
+    if (!mounted) return;
+    setState(() {
+      _samples = samples;
+      if (_samples.isEmpty) {
+        _selectedSampleIndex = 0;
+      } else if (_selectedSampleIndex >= _samples.length) {
+        _selectedSampleIndex = 0;
+      }
+      if (_samples.isNotEmpty) {
+        _selectFirstSampleForModule(_activeModuleCode);
+      }
+      _selectedSampleIndexNotifier.value = _selectedSampleIndex;
+      _isLoadingSamples = false;
+      _sampleLoadError = null;
+    });
+    _queueSelectedGotObservationSync();
+  }
+
+  void _queueSelectedGotObservationSync() {
+    if (_gotObservationSyncQueued) return;
+    _gotObservationSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _gotObservationSyncQueued = false;
+      unawaited(_watchSelectedGotObservation());
+    });
+    _queueSelectedGotEvidenceSync();
+    _queueSelectedFetObservationSync();
+    _queueSelectedReviewTimelineSync();
+  }
+
+  void _queueSelectedGotEvidenceSync() {
+    if (_gotEvidenceSyncQueued) return;
+    _gotEvidenceSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _gotEvidenceSyncQueued = false;
+      unawaited(_watchSelectedGotEvidence());
+    });
+  }
+
+  void _queueSelectedFetObservationSync() {
+    if (_fetObservationSyncQueued) return;
+    _fetObservationSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _fetObservationSyncQueued = false;
+      unawaited(_watchSelectedFetObservation());
+    });
+  }
+
+  void _queueSelectedReviewTimelineSync() {
+    if (_reviewTimelineSyncQueued) return;
+    _reviewTimelineSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _reviewTimelineSyncQueued = false;
+      unawaited(_watchSelectedReviewTimeline());
+    });
+  }
+
+  Future<void> _watchSelectedGotObservation() async {
+    if (!_hasSamples || !_sampleSupportsModule(_selectedSample, 'GOT')) {
+      _gotObservationWatchKey = null;
+      await _gotObservationSubscription?.cancel();
+      _gotObservationSubscription = null;
+      if (!mounted) return;
+      setState(() {
+        _isLoadingGotObservation = false;
+        _hasPersistedGotObservation = false;
+        _gotObservationLoadError = null;
+        _resetGotObservationCounters();
+      });
+      return;
+    }
+
+    final sample = _selectedSample;
+    final stage = _gotObservationStagePayload;
+    final watchKey = [
+      sample.lotId,
+      sample.sampleId,
+      _gotPlotId,
+      stage,
+    ].join('|');
+    if (_gotObservationWatchKey == watchKey) return;
+
+    _gotObservationWatchKey = watchKey;
+    await _gotObservationSubscription?.cancel();
+    _gotObservationSubscription = null;
+    if (!mounted) return;
+
+    setState(() {
+      _isLoadingGotObservation = true;
+      _hasPersistedGotObservation = false;
+      _gotObservationLoadError = null;
+      _resetGotObservationCounters();
+    });
+
+    _gotObservationSubscription = _gotFetService
+        .watchGotObservationRows(
+      lotId: sample.lotId,
+      sampleId: sample.sampleId,
+      plotId: _gotPlotId,
+      stage: stage,
+    )
+        .listen(
+      (rows) {
+        if (!mounted || _gotObservationWatchKey != watchKey) return;
+        final latestRow = rows.isEmpty ? null : rows.first;
+        _applyGotObservationRow(latestRow);
+      },
+      onError: (Object error) {
+        if (!mounted || _gotObservationWatchKey != watchKey) return;
+        setState(() {
+          _isLoadingGotObservation = false;
+          _gotObservationLoadError = _friendlyError(error);
+        });
+        unawaited(_fetchSelectedGotObservationFallback(watchKey));
+      },
+    );
+  }
+
+  Future<void> _fetchSelectedGotObservationFallback(String watchKey) async {
+    if (!_hasSamples) return;
+    final sample = _selectedSample;
+    final stage = _gotObservationStagePayload;
+    try {
+      final latestRow = await _gotFetService.fetchLatestGotObservation(
+        lotId: sample.lotId,
+        sampleId: sample.sampleId,
+        plotId: _gotPlotId,
+        stage: stage,
+      );
+      if (!mounted || _gotObservationWatchKey != watchKey) return;
+      _applyGotObservationRow(latestRow);
+    } catch (error) {
+      if (!mounted || _gotObservationWatchKey != watchKey) return;
+      setState(() {
+        _isLoadingGotObservation = false;
+        _gotObservationLoadError = _friendlyError(error);
+      });
+    }
+  }
+
+  void _applyGotObservationRow(Map<String, dynamic>? row) {
+    if (!mounted) return;
+    setState(() {
+      _isLoadingGotObservation = false;
+      _gotObservationLoadError = null;
+      _hasPersistedGotObservation = row != null;
+
+      if (row == null) {
+        _resetGotObservationCounters();
+        _gotNoteController.clear();
+        return;
+      }
+
+      _gotTotalObserved = _readInt(row, const ['total_observed']);
+      _gotOffType = _readInt(row, const ['off_type_count', 'offtype_count']);
+      _gotSelfing = _readInt(row, const ['selfing_count']);
+      _gotMale = _readInt(row, const ['male_count']);
+      _gotSuspicious = _readInt(row, const ['suspicious_count']);
+      _syncGotCountControllers();
+
+      final remarks = _readNullableText(row, const ['remarks']);
+      _setControllerText(_gotNoteController, remarks ?? '');
+    });
+  }
+
+  void _resetGotObservationCounters() {
+    _gotTotalObserved = 0;
+    _gotOffType = 0;
+    _gotSelfing = 0;
+    _gotMale = 0;
+    _gotSuspicious = 0;
+    _syncGotCountControllers();
+  }
+
+  void _setControllerText(TextEditingController controller, String text) {
+    if (controller.text == text) return;
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
+
+  Future<void> _watchSelectedGotEvidence() async {
+    if (!_hasSamples || !_sampleSupportsModule(_selectedSample, 'GOT')) {
+      _gotEvidenceWatchKey = null;
+      await _gotEvidenceSubscription?.cancel();
+      _gotEvidenceSubscription = null;
+      if (!mounted) return;
+      setState(() {
+        _isLoadingGotEvidence = false;
+        _gotEvidenceLoadError = null;
+        _gotEvidenceBySlot = {};
+      });
+      return;
+    }
+
+    final sample = _selectedSample;
+    final stage = _gotObservationStagePayload;
+    final watchKey = [
+      sample.lotId,
+      sample.sampleId,
+      _gotPlotId,
+      stage,
+    ].join('|');
+    if (_gotEvidenceWatchKey == watchKey) return;
+
+    _gotEvidenceWatchKey = watchKey;
+    await _gotEvidenceSubscription?.cancel();
+    _gotEvidenceSubscription = null;
+    if (!mounted) return;
+
+    setState(() {
+      _isLoadingGotEvidence = true;
+      _gotEvidenceLoadError = null;
+      _gotEvidenceBySlot = {};
+    });
+
+    _gotEvidenceSubscription = _gotFetService
+        .watchGotEvidenceRows(
+      lotId: sample.lotId,
+      sampleId: sample.sampleId,
+      plotId: _gotPlotId,
+      stage: stage,
+    )
+        .listen(
+      (rows) {
+        if (!mounted || _gotEvidenceWatchKey != watchKey) return;
+        _applyGotEvidenceRows(rows);
+      },
+      onError: (Object error) {
+        if (!mounted || _gotEvidenceWatchKey != watchKey) return;
+        setState(() {
+          _isLoadingGotEvidence = false;
+          _gotEvidenceLoadError = _friendlyError(error);
+        });
+      },
+    );
+  }
+
+  void _applyGotEvidenceRows(List<Map<String, dynamic>> rows) {
+    final photos = <String, _GotEvidencePhoto>{};
+    for (final row in rows) {
+      final photo = _gotEvidencePhotoFromRow(row);
+      if (photo == null) continue;
+      photos.putIfAbsent(photo.slotKey, () => photo);
+    }
+
+    setState(() {
+      _isLoadingGotEvidence = false;
+      _gotEvidenceLoadError = null;
+      _gotEvidenceBySlot = photos;
+    });
+  }
+
+  _GotEvidencePhoto? _gotEvidencePhotoFromRow(Map<String, dynamic> row) {
+    final categoryKey = _readText(row, const ['evidence_category']);
+    final rcvNo = _readInt(row, const ['rcv_no']);
+    final photoUrl = _readText(row, const ['photo_url']);
+    if (categoryKey == '-' || rcvNo <= 0 || photoUrl == '-') return null;
+
+    return _GotEvidencePhoto(
+      categoryKey: categoryKey,
+      rcvNo: rcvNo,
+      rcvLabel: _readText(
+        row,
+        const ['rcv_label', 'replication'],
+        fallback: '$categoryKey $rcvNo',
+      ),
+      photoUrl: photoUrl,
+      uploadedBy: _readText(row, const ['uploaded_by']),
+      uploadedAt: _readDate(row, const ['uploaded_datetime']),
+    );
+  }
+
+  Future<void> _watchSelectedFetObservation() async {
+    if (!_hasSamples || !_sampleSupportsModule(_selectedSample, 'FET')) {
+      _fetObservationWatchKey = null;
+      await _fetObservationSubscription?.cancel();
+      _fetObservationSubscription = null;
+      if (!mounted) return;
+      setState(() => _latestFetObservation = null);
+      return;
+    }
+
+    final sample = _selectedSample;
+    final watchKey = [
+      sample.lotId,
+      sample.sampleId,
+      _fetPlotId,
+      _selectedReplication,
+    ].join('|');
+    if (_fetObservationWatchKey == watchKey) return;
+
+    _fetObservationWatchKey = watchKey;
+    await _fetObservationSubscription?.cancel();
+    _fetObservationSubscription = null;
+    if (!mounted) return;
+    setState(() => _latestFetObservation = null);
+
+    _fetObservationSubscription = _gotFetService
+        .watchFetObservationRows(
+      lotId: sample.lotId,
+      sampleId: sample.sampleId,
+      plotId: _fetPlotId,
+      replication: _selectedReplication,
+    )
+        .listen(
+      (rows) {
+        if (!mounted || _fetObservationWatchKey != watchKey) return;
+        _applyFetObservationRow(rows.isEmpty ? null : rows.first);
+      },
+      onError: (Object error) {
+        if (!mounted || _fetObservationWatchKey != watchKey) return;
+        unawaited(_fetchSelectedFetObservationFallback(watchKey));
+      },
+    );
+  }
+
+  Future<void> _fetchSelectedFetObservationFallback(String watchKey) async {
+    if (!_hasSamples) return;
+    final sample = _selectedSample;
+    try {
+      final row = await _gotFetService.fetchLatestFetObservation(
+        lotId: sample.lotId,
+        sampleId: sample.sampleId,
+        plotId: _fetPlotId,
+        replication: _selectedReplication,
+      );
+      if (!mounted || _fetObservationWatchKey != watchKey) return;
+      _applyFetObservationRow(row);
+    } catch (_) {
+      if (!mounted || _fetObservationWatchKey != watchKey) return;
+      setState(() => _latestFetObservation = null);
+    }
+  }
+
+  void _applyFetObservationRow(Map<String, dynamic>? row) {
+    final result = row == null ? null : _fetObservationFromRow(row);
+    setState(() {
+      _latestFetObservation = result;
+      if (result != null && result.pointStatuses.length == _fetGridPointCount) {
+        final target =
+            result.replication == 1 ? _replicationOne : _replicationTwo;
+        target
+          ..clear()
+          ..addAll(result.pointStatuses);
+      }
+    });
+  }
+
+  _FetObservationResult _fetObservationFromRow(Map<String, dynamic> row) {
+    return _FetObservationResult(
+      lotId: _readText(row, const ['lot_id']),
+      sampleId: _readText(row, const ['sample_id']),
+      plotId: _readText(row, const ['plot_id']),
+      replication: _readInt(row, const ['replication']),
+      dap: _readInt(row, const ['dap']),
+      totalPoints: _readInt(row, const ['total_points']),
+      grownCount: _readInt(row, const ['grown_count']),
+      notGrownCount: _readInt(row, const ['not_grown_count']),
+      reviewCount: _readInt(row, const ['review_count']),
+      notReadableCount: _readInt(row, const ['not_readable_count']),
+      emergencePercent: _readDouble(row, const ['emergence_percent']) ?? 0,
+      plotPhotoUrl: _readNullableText(row, const ['plot_photo_url']),
+      submittedBy: _readText(row, const ['submitted_by']),
+      submittedAt: _readDate(row, const ['submitted_datetime']),
+      pointStatuses: _readFetPointStatuses(row),
+    );
+  }
+
+  Future<void> _watchSelectedReviewTimeline() async {
+    if (!_hasSamples) {
+      _reviewTimelineWatchKey = null;
+      await _reviewTimelineSubscription?.cancel();
+      _reviewTimelineSubscription = null;
+      if (!mounted) return;
+      setState(() {
+        _reviewTimelineEvents = [];
+        _reviewTimelineLoadError = null;
+      });
+      return;
+    }
+
+    final sample = _selectedSample;
+    final module = _activeModuleCode;
+    if (!_sampleSupportsModule(sample, module)) {
+      _reviewTimelineWatchKey = null;
+      await _reviewTimelineSubscription?.cancel();
+      _reviewTimelineSubscription = null;
+      if (!mounted) return;
+      setState(() {
+        _reviewTimelineEvents = [];
+        _reviewTimelineLoadError = null;
+      });
+      return;
+    }
+
+    final watchKey = [sample.lotId, sample.sampleId, module].join('|');
+    if (_reviewTimelineWatchKey == watchKey) return;
+
+    _reviewTimelineWatchKey = watchKey;
+    await _reviewTimelineSubscription?.cancel();
+    _reviewTimelineSubscription = null;
+    if (!mounted) return;
+    setState(() {
+      _reviewTimelineEvents = [];
+      _reviewTimelineLoadError = null;
+    });
+
+    _reviewTimelineSubscription = _gotFetService
+        .watchReviewTimelineRows(
+      lotId: sample.lotId,
+      sampleId: sample.sampleId,
+      module: module,
+    )
+        .listen(
+      (rows) {
+        if (!mounted || _reviewTimelineWatchKey != watchKey) return;
+        setState(() {
+          _reviewTimelineEvents = [
+            for (final row in rows) _reviewTimelineEventFromRow(row),
+          ];
+          _reviewTimelineLoadError = null;
+        });
+      },
+      onError: (Object error) {
+        if (!mounted || _reviewTimelineWatchKey != watchKey) return;
+        setState(() => _reviewTimelineLoadError = _friendlyError(error));
+      },
+    );
+  }
+
+  _ReviewTimelineEvent _reviewTimelineEventFromRow(Map<String, dynamic> row) {
+    final source = row['_source']?.toString();
+    final isReview = source == 'review';
+    final label = isReview
+        ? _readText(row, const ['new_status', 'review_action'])
+        : _readText(row, const ['status']);
+    final date = _readDate(
+          row,
+          isReview
+              ? const ['review_datetime']
+              : const ['event_datetime', 'created_at'],
+        ) ??
+        DateTime.now();
+    return _ReviewTimelineEvent(
+      label: label,
+      date: date,
+      done: true,
+      actor: _readNullableText(
+        row,
+        isReview ? const ['reviewer'] : const ['actor'],
+      ),
+      remarks: _readNullableText(row, const ['remarks']),
+    );
+  }
+
+  _GotFetNavEntry _navSnapshot() {
+    return _GotFetNavEntry(
+      page: _page,
+      module: _activeModule,
+      reviewSegment: _reviewSegment,
+      gotStage: _gotObservationStage,
+      selectedSampleIndex: _selectedSampleIndex,
+    );
+  }
+
+  void _rememberCurrentPage(_GotFetPage nextPage) {
+    if (nextPage == _page) return;
+    final snapshot = _navSnapshot();
+    if (_pageHistory.isNotEmpty) {
+      final last = _pageHistory.last;
+      final duplicate = last.page == snapshot.page &&
+          last.module == snapshot.module &&
+          last.reviewSegment == snapshot.reviewSegment &&
+          last.gotStage == snapshot.gotStage &&
+          last.selectedSampleIndex == snapshot.selectedSampleIndex;
+      if (duplicate) return;
+    }
+    _pageHistory.add(snapshot);
+    if (_pageHistory.length > 24) {
+      _pageHistory.removeAt(0);
+    }
+  }
+
+  void _applyPageContext(_GotFetPage page) {
+    final module = _moduleForPage(page);
+    if (module != null) {
+      _activeModule =
+          module == 'GOT' ? _InspectionModule.got : _InspectionModule.fet;
+      _reviewSegment = module == 'GOT' ? 0 : 1;
+      _selectFirstSampleForModule(module);
+    }
+  }
+
+  void _openPage(_GotFetPage page, {bool remember = true}) {
+    setState(() {
+      if (remember) _rememberCurrentPage(page);
+      _applyPageContext(page);
+      _page = page;
+    });
+    _queueSelectedGotObservationSync();
+  }
+
+  void _openReviewModule(int segment, {bool remember = true}) {
+    final page = segment == 0 ? _GotFetPage.gotReview : _GotFetPage.fetReview;
+    setState(() {
+      if (remember) _rememberCurrentPage(page);
+      _reviewSegment = segment;
+      _activeModule =
+          segment == 0 ? _InspectionModule.got : _InspectionModule.fet;
+      _selectFirstSampleForModule(_activeModuleCode);
+      _page = page;
+    });
+    _queueSelectedGotObservationSync();
+  }
+
+  void _setActiveModule(_InspectionModule module) {
+    setState(() {
+      _activeModule = module;
+      _reviewSegment = module == _InspectionModule.got ? 0 : 1;
+      _batchListVisibleCount = _batchListPageSize;
+      _selectFirstSampleForModule(_activeModuleCode);
+
+      final currentPageModule = _moduleForPage(_page);
+      if (currentPageModule != null && currentPageModule != _activeModuleCode) {
+        final targetPage = _GotFetPage.home;
+        _rememberCurrentPage(targetPage);
+        _page = targetPage;
+      }
+    });
+    _queueSelectedGotObservationSync();
+  }
+
+  bool _goBack() {
+    if (_pageHistory.isNotEmpty) {
+      final previous = _pageHistory.removeLast();
+      setState(() {
+        _page = previous.page;
+        _activeModule = previous.module;
+        _reviewSegment = previous.reviewSegment;
+        _gotObservationStage = previous.gotStage;
+        if (_hasSamples) {
+          _selectedSampleIndex = previous.selectedSampleIndex
+              .clamp(
+                0,
+                _samples.length - 1,
+              )
+              .toInt();
+          _selectedSampleIndexNotifier.value = _selectedSampleIndex;
+        }
+        _selectFirstSampleForModule(_activeModuleCode);
+      });
+      _queueSelectedGotObservationSync();
+      return true;
+    }
+
+    if (_page != _GotFetPage.home) {
+      _openPage(_GotFetPage.home, remember: false);
+      return true;
+    }
+
+    return false;
+  }
+
+  void _selectBatchIndex(int index) {
+    if (_selectedSampleIndex == index) return;
+
+    _selectedSampleIndex = index;
+    _selectedSampleIndexNotifier.value = index;
+    _queueSelectedGotObservationSync();
+
+    if (_selectionRebuildQueued) return;
+    _selectionRebuildQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _selectionRebuildQueued = false);
+    });
+  }
+
+  void _setGotObservationStage(_GotObservationStage stage) {
+    if (_gotObservationStage == stage) return;
+    setState(() => _gotObservationStage = stage);
+    _queueSelectedGotObservationSync();
+  }
+
+  void _openBatchQuickActions(int index, String module) {
+    _selectBatchIndex(index);
+    HapticFeedback.selectionClick();
+
+    final normalizedModule = module.toUpperCase() == 'FET' ? 'FET' : 'GOT';
+    final sample = _samples[index];
+    final actions = _quickActionsForModule(normalizedModule);
+
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: _gotFetCardColor(context),
+      builder: (sheetContext) {
+        return _BatchQuickActionSheet(
+          sample: sample,
+          module: normalizedModule,
+          actions: actions,
+          onAction: (action) {
+            Navigator.of(sheetContext).pop();
+            _runBatchQuickAction(action);
+          },
+        );
+      },
+    );
+  }
+
+  List<_BatchQuickAction> _quickActionsForModule(String module) {
+    if (module == 'FET') {
+      return const [
+        _BatchQuickAction(
+          label: 'Foto Plot',
+          subtitle: 'Buka scanner/foto plot FET',
+          icon: Icons.grid_on_rounded,
+          page: _GotFetPage.fetPhoto,
+        ),
+        _BatchQuickAction(
+          label: 'Analisa Plot',
+          subtitle: 'Review titik tanam 10 x 10',
+          icon: Icons.analytics_rounded,
+          page: _GotFetPage.fetAnalysis,
+        ),
+        _BatchQuickAction(
+          label: 'Input FET',
+          subtitle: 'Isi hasil emergence',
+          icon: Icons.edit_note_rounded,
+          page: _GotFetPage.fetInput,
+        ),
+        _BatchQuickAction(
+          label: 'Review FET',
+          subtitle: 'Lihat status dan keputusan',
+          icon: Icons.verified_rounded,
+          page: _GotFetPage.fetReview,
+          reviewSegment: 1,
+        ),
+      ];
+    }
+
+    return const [
+      _BatchQuickAction(
+        label: 'Data Tanam',
+        subtitle: 'Update tanggal, lokasi, field area',
+        icon: Icons.edit_calendar_rounded,
+        page: _GotFetPage.gotPlantingData,
+      ),
+      _BatchQuickAction(
+        label: 'Foto GOT',
+        subtitle: 'Ambil evidence tanaman',
+        icon: Icons.center_focus_strong_rounded,
+        page: _GotFetPage.gotPhoto,
+      ),
+      _BatchQuickAction(
+        label: 'Input Vegetatif',
+        subtitle: 'Isi hasil pengamatan awal',
+        icon: Icons.grass_rounded,
+        page: _GotFetPage.gotInput,
+        stage: _GotObservationStage.vegetative,
+      ),
+      _BatchQuickAction(
+        label: 'Input Generative',
+        subtitle: 'Isi hasil pengamatan generative',
+        icon: Icons.local_florist_rounded,
+        page: _GotFetPage.gotInput,
+        stage: _GotObservationStage.finalGenerative,
+      ),
+      _BatchQuickAction(
+        label: 'Review GOT',
+        subtitle: 'Lihat status dan keputusan',
+        icon: Icons.verified_rounded,
+        page: _GotFetPage.gotReview,
+        reviewSegment: 0,
+      ),
+    ];
+  }
+
+  void _runBatchQuickAction(_BatchQuickAction action) {
+    if (action.stage != null) {
+      _setGotObservationStage(action.stage!);
+    }
+    if (action.reviewSegment != null) {
+      _openReviewModule(action.reviewSegment!);
+      return;
+    }
+    _openPage(action.page);
   }
 
   void _toggleTheme() {
@@ -204,130 +1303,193 @@ class _GotFetScreenState extends State<GotFetScreen> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    return Scaffold(
-      backgroundColor: _gotFetScreenColor(context),
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        toolbarHeight: 66,
-        backgroundColor:
-            isDark ? AdvantaColors.navyDark : AdvantaColors.lightSurface,
-        foregroundColor: _gotFetTextColor(context),
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        leading: _page == _GotFetPage.home
-            ? null
-            : IconButton(
-                tooltip: 'Home Dashboard',
-                icon: const Icon(Icons.arrow_back_rounded),
-                onPressed: () => _openPage(_GotFetPage.home),
+    return PopScope(
+      canPop: _page == _GotFetPage.home && _pageHistory.isEmpty,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _goBack();
+      },
+      child: Scaffold(
+        backgroundColor: _gotFetScreenColor(context),
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          toolbarHeight: 66,
+          backgroundColor:
+              isDark ? AdvantaColors.navyDark : AdvantaColors.lightSurface,
+          foregroundColor: _gotFetTextColor(context),
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          leading: _page == _GotFetPage.home && _pageHistory.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Kembali',
+                  icon: const Icon(Icons.arrow_back_rounded),
+                  onPressed: _goBack,
+                ),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _pageTitle,
+                style: AdvantaText.brandTitle.copyWith(
+                  color: _gotFetTextColor(context),
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0,
+                ),
               ),
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+              const SizedBox(height: 2),
+              Text(
+                _pageSubtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AdvantaText.caption.copyWith(
+                  color: _gotFetMutedColor(context),
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            IconButton(
+              tooltip: isDark ? 'Gunakan light mode' : 'Gunakan dark mode',
+              icon: Icon(
+                isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+              ),
+              onPressed: _toggleTheme,
+            ),
+            IconButton(
+              tooltip: 'User Settings',
+              icon: const Icon(Icons.account_circle_rounded),
+              onPressed: () => context.push('/got-fet/settings'),
+            ),
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(58),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: _buildModuleToggle(),
+            ),
+          ),
+        ),
+        body: Stack(
           children: [
-            Text(
-              _pageTitle,
-              style: AdvantaText.brandTitle.copyWith(
-                color: _gotFetTextColor(context),
-                fontSize: 16,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 0,
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              child: KeyedSubtree(
+                key: ValueKey(_page),
+                child: _buildCurrentPage(),
               ),
             ),
-            const SizedBox(height: 2),
-            Text(
-              _pageSubtitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: AdvantaText.caption.copyWith(
-                color: _gotFetMutedColor(context),
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0,
+            if (_isSyncing)
+              const Positioned.fill(
+                child: _LoadingOverlay(),
               ),
+          ],
+        ),
+        bottomNavigationBar: NavigationBar(
+          backgroundColor:
+              isDark ? AdvantaColors.navyDeep : AdvantaColors.lightSurface,
+          indicatorColor: isDark
+              ? AdvantaColors.green.withAlpha(44)
+              : AdvantaColors.greenSoft,
+          surfaceTintColor: Colors.transparent,
+          selectedIndex: _bottomIndex,
+          onDestinationSelected: _openBottomDestination,
+          destinations: const [
+            NavigationDestination(
+              icon: Icon(Icons.home_outlined),
+              selectedIcon: Icon(Icons.home_rounded),
+              label: 'Home',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.inventory_2_outlined),
+              selectedIcon: Icon(Icons.inventory_2_rounded),
+              label: 'Lot',
             ),
           ],
         ),
-        actions: [
-          IconButton(
-            tooltip: isDark ? 'Gunakan light mode' : 'Gunakan dark mode',
-            icon: Icon(
-              isDark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
-            ),
-            onPressed: _toggleTheme,
-          ),
-          IconButton(
-            tooltip: 'User Settings',
-            icon: const Icon(Icons.account_circle_rounded),
-            onPressed: () => context.push('/got-fet/settings'),
-          ),
-        ],
       ),
-      body: Stack(
-        children: [
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 220),
-            child: KeyedSubtree(
-              key: ValueKey(_page),
-              child: _buildCurrentPage(),
-            ),
-          ),
-          if (_isSyncing)
-            const Positioned.fill(
-              child: _LoadingOverlay(),
-            ),
-        ],
+    );
+  }
+
+  Widget _buildModuleToggle() {
+    final isDark = _gotFetIsDark(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: isDark ? AdvantaColors.navyDeep : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _gotFetBorderColor(context)),
       ),
-      bottomNavigationBar: NavigationBar(
-        backgroundColor:
-            isDark ? AdvantaColors.navyDeep : AdvantaColors.lightSurface,
-        indicatorColor: isDark
-            ? AdvantaColors.green.withAlpha(44)
-            : AdvantaColors.greenSoft,
-        surfaceTintColor: Colors.transparent,
-        selectedIndex: _bottomIndex,
-        onDestinationSelected: _openBottomDestination,
-        destinations: [
-          const NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home_rounded),
-            label: 'Home',
+      child: SegmentedButton<_InspectionModule>(
+        showSelectedIcon: false,
+        style: ButtonStyle(
+          visualDensity: VisualDensity.compact,
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          padding: const WidgetStatePropertyAll(
+            EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           ),
-          const NavigationDestination(
-            icon: Icon(Icons.inventory_2_outlined),
-            selectedIcon: Icon(Icons.inventory_2_rounded),
-            label: 'Lot',
+          foregroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) {
+              return isDark ? Colors.white : AdvantaColors.navy;
+            }
+            return isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy;
+          }),
+          iconColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) {
+              return isDark ? Colors.white : AdvantaColors.greenDark;
+            }
+            return isDark ? AdvantaColors.textMutedDark : AdvantaColors.navy;
+          }),
+          textStyle: const WidgetStatePropertyAll(AdvantaText.bodyBold),
+          backgroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) {
+              return isDark
+                  ? AdvantaColors.green.withAlpha(54)
+                  : AdvantaColors.greenSoft;
+            }
+            return Colors.transparent;
+          }),
+          side: WidgetStatePropertyAll(
+            BorderSide(color: Colors.transparent),
           ),
-          NavigationDestination(
-            icon: _NavLogo(asset: _GotFetAssets.gotLogo),
-            selectedIcon:
-                _NavLogo(asset: _GotFetAssets.gotLogo, selected: true),
-            label: 'GOT',
+        ),
+        segments: [
+          ButtonSegment<_InspectionModule>(
+            value: _InspectionModule.got,
+            label: const Text('GOT'),
+            icon: _SegmentLogo(asset: _GotFetAssets.gotLogo),
           ),
-          NavigationDestination(
-            icon: _NavLogo(asset: _GotFetAssets.fetLogo),
-            selectedIcon:
-                _NavLogo(asset: _GotFetAssets.fetLogo, selected: true),
-            label: 'FET',
-          ),
-          const NavigationDestination(
-            icon: Icon(Icons.verified_outlined),
-            selectedIcon: Icon(Icons.verified_rounded),
-            label: 'Review',
+          ButtonSegment<_InspectionModule>(
+            value: _InspectionModule.fet,
+            label: const Text('FET'),
+            icon: _SegmentLogo(asset: _GotFetAssets.fetLogo),
           ),
         ],
+        selected: {_activeModule},
+        onSelectionChanged: (selection) => _setActiveModule(selection.first),
       ),
     );
   }
 
   String get _pageTitle {
     return switch (_page) {
-      _GotFetPage.home => 'Digital GOT & FET',
+      _GotFetPage.home => 'Digital $_activeModuleCode',
       _GotFetPage.lotTracking => 'Lot Tracking',
+      _GotFetPage.gotPlantingData => 'GOT - Data Tanam',
+      _GotFetPage.gotWorkspace => 'Fitur GOT',
       _GotFetPage.gotPhoto => 'GOT Photo',
       _GotFetPage.gotInput => 'GOT - Input Hasil',
+      _GotFetPage.fetWorkspace => 'Fitur FET',
       _GotFetPage.fetPhoto => 'FET Plot Scanner',
       _GotFetPage.fetAnalysis => 'Hasil Analisa Plot',
       _GotFetPage.fetInput => 'FET - Input Hasil',
       _GotFetPage.review => 'Review & Status',
+      _GotFetPage.gotReview => 'Review GOT',
+      _GotFetPage.fetReview => 'Review FET',
     };
   }
 
@@ -335,7 +1497,19 @@ class _GotFetScreenState extends State<GotFetScreen> {
     if (_page == _GotFetPage.home) {
       return _session?.name.trim().isNotEmpty == true
           ? _session!.name
-          : 'Traceable. Accurate. Reliable.';
+          : _activeModuleTitle;
+    }
+
+    if (_page == _GotFetPage.gotWorkspace) {
+      return 'Grow Out Test workflow';
+    }
+
+    if (_page == _GotFetPage.fetWorkspace) {
+      return 'Field Emergence Test workflow';
+    }
+
+    if (!_hasSamples) {
+      return 'Menunggu data Batch dari Supabase';
     }
 
     return '${_selectedSample.lotId} | ${_selectedSample.hybrid}';
@@ -345,47 +1519,222 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return switch (_page) {
       _GotFetPage.home => 0,
       _GotFetPage.lotTracking => 1,
-      _GotFetPage.gotPhoto || _GotFetPage.gotInput => 2,
+      _ => 0,
+    };
+  }
+
+  String? _moduleForPage(_GotFetPage page) {
+    return switch (page) {
+      _GotFetPage.gotPlantingData ||
+      _GotFetPage.gotWorkspace ||
+      _GotFetPage.gotPhoto ||
+      _GotFetPage.gotInput ||
+      _GotFetPage.gotReview =>
+        'GOT',
+      _GotFetPage.fetWorkspace ||
       _GotFetPage.fetPhoto ||
       _GotFetPage.fetAnalysis ||
-      _GotFetPage.fetInput =>
-        3,
-      _GotFetPage.review => 4,
+      _GotFetPage.fetInput ||
+      _GotFetPage.fetReview =>
+        'FET',
+      _ => null,
     };
+  }
+
+  bool _sampleSupportsModule(_GotFetSample sample, String module) {
+    final testType = sample.testType.toUpperCase();
+    return testType.contains(module) || testType.contains('GOT + FET');
+  }
+
+  List<int> _sampleIndexesForModule(String? module) {
+    if (module == null) {
+      return [for (var i = 0; i < _samples.length; i++) i];
+    }
+
+    final indexes = [
+      for (var i = 0; i < _samples.length; i++)
+        if (_sampleSupportsModule(_samples[i], module)) i,
+    ];
+
+    return indexes;
+  }
+
+  bool _hasSamplesForModule(String? module) =>
+      _sampleIndexesForModule(module).isNotEmpty;
+
+  void _selectFirstSampleForModule(String module) {
+    if (!_hasSamples) return;
+    if (_sampleSupportsModule(_selectedSample, module)) return;
+    final indexes = _sampleIndexesForModule(module);
+    if (indexes.isNotEmpty) {
+      _selectedSampleIndex = indexes.first;
+      _selectedSampleIndexNotifier.value = _selectedSampleIndex;
+      _queueSelectedGotObservationSync();
+    }
   }
 
   void _openBottomDestination(int index) {
-    final page = switch (index) {
-      0 => _GotFetPage.home,
-      1 => _GotFetPage.lotTracking,
-      2 => _GotFetPage.gotInput,
-      3 => _GotFetPage.fetPhoto,
-      _ => _GotFetPage.review,
-    };
-    _openPage(page);
+    switch (index) {
+      case 0:
+        _openPage(_GotFetPage.home);
+      case 1:
+        _openPage(_GotFetPage.lotTracking);
+    }
   }
 
   Widget _buildCurrentPage() {
+    final canRenderWithoutSamples =
+        _page == _GotFetPage.home || _page == _GotFetPage.lotTracking;
+    final requiredModule =
+        _page == _GotFetPage.review ? _activeModuleCode : _moduleForPage(_page);
+    final hasRequiredSamples = requiredModule == null
+        ? _hasSamples
+        : _hasSamplesForModule(requiredModule);
+
+    if (_isLoadingSamples && !canRenderWithoutSamples) {
+      return const _SampleStatePage(
+        icon: Icons.cloud_sync_rounded,
+        title: 'Memuat Batch',
+        message: 'Mengambil data master GOT & FET dari Supabase.',
+      );
+    }
+
+    if (!hasRequiredSamples && !canRenderWithoutSamples) {
+      return _buildSampleRequiredPage();
+    }
+
     return switch (_page) {
       _GotFetPage.home => _buildHomeDashboard(),
       _GotFetPage.lotTracking => _buildLotTrackingPage(),
+      _GotFetPage.gotPlantingData => _buildGotPlantingDataPage(),
+      _GotFetPage.gotWorkspace => _buildGotWorkspacePage(),
       _GotFetPage.gotPhoto => _buildGotPhotoPage(),
       _GotFetPage.gotInput => _buildGotInputPage(),
+      _GotFetPage.fetWorkspace => _buildFetWorkspacePage(),
       _GotFetPage.fetPhoto => _buildFetPhotoPage(),
       _GotFetPage.fetAnalysis => _buildFetAnalysisPage(),
       _GotFetPage.fetInput => _buildFetInputPage(),
       _GotFetPage.review => _buildReviewPage(),
+      _GotFetPage.gotReview => _buildGotReviewPage(),
+      _GotFetPage.fetReview => _buildFetReviewPage(),
     };
   }
 
+  Widget _buildSampleRequiredPage() {
+    return _PageScaffold(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSampleStatePanel(),
+          const SizedBox(height: 14),
+          _ModuleStrip(
+            logoAsset: _activeModuleLogo,
+            title: _activeModuleTitle,
+            subtitle: _activeModuleSubtitle,
+          ),
+          const SizedBox(height: 14),
+          Text('Fitur $_activeModuleCode', style: _sectionTitle(context)),
+          const SizedBox(height: 10),
+          _buildMainMenuGrid(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSampleStatePanel() {
+    final loading = _isLoadingSamples;
+    final title = loading ? 'Memuat Batch' : 'Data Batch Belum Ada';
+    final message = loading
+        ? 'Mengambil data master GOT & FET dari Supabase.'
+        : _sampleLoadError == null
+            ? 'Tabel got_fet_samples belum berisi data Batch untuk inspeksi real-time.'
+            : 'Gagal memuat got_fet_samples: $_sampleLoadError';
+
+    return _PanelCard(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: AdvantaColors.green.withAlpha(
+                _gotFetIsDark(context) ? 52 : 24,
+              ),
+              shape: BoxShape.circle,
+            ),
+            child: loading
+                ? const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: CircularProgressIndicator(strokeWidth: 2.5),
+                  )
+                : Icon(
+                    Icons.dataset_outlined,
+                    color: _gotFetIsDark(context)
+                        ? Colors.white
+                        : AdvantaColors.greenDark,
+                  ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  message,
+                  style: AdvantaText.body2.copyWith(
+                    color: _gotFetMutedColor(context),
+                  ),
+                ),
+                if (!loading) ...[
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('Muat Ulang'),
+                    onPressed: _loadSamplesFromDatabase,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildHomeDashboard() {
+    final summary = _sampleSummary;
+    final activeSampleIndexes = _sampleIndexesForModule(_activeModuleCode);
+    final headerSample = activeSampleIndexes.contains(_selectedSampleIndex)
+        ? _selectedSample
+        : activeSampleIndexes.isNotEmpty
+            ? _samples[activeSampleIndexes.first]
+            : null;
+
     return _PageScaffold(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _BrandHeader(
             userName: _session?.name,
-            selectedSample: _selectedSample,
+            selectedSample: headerSample,
+          ),
+          if (!_hasSamples) ...[
+            const SizedBox(height: 12),
+            _buildSampleStatePanel(),
+          ],
+          const SizedBox(height: 16),
+          _ModuleStrip(
+            logoAsset: _activeModuleLogo,
+            title: _activeModuleTitle,
+            subtitle: _activeModuleSubtitle,
           ),
           const SizedBox(height: 16),
           Text('Ringkasan Hari Ini', style: _sectionTitle(context)),
@@ -394,38 +1743,32 @@ class _GotFetScreenState extends State<GotFetScreen> {
             cards: [
               _MetricData(
                 'Observasi Due',
-                _samples.where((sample) => sample.isOverdue).length.toString(),
+                summary.overdue.toString(),
                 Icons.event_busy_rounded,
                 AdvantaColors.error,
               ),
               _MetricData(
                 'Belum Dikirim',
-                '2',
+                summary.pending.toString(),
                 Icons.outbox_rounded,
                 AdvantaColors.gold,
               ),
               _MetricData(
                 'Menunggu Review',
-                _samples
-                    .where((sample) => sample.status.contains('Review'))
-                    .length
-                    .toString(),
+                summary.review.toString(),
                 Icons.rate_review_rounded,
                 AdvantaColors.gold,
               ),
               _MetricData(
                 'Selesai',
-                _samples
-                    .where((sample) => sample.status == 'Approved')
-                    .length
-                    .toString(),
+                summary.approved.toString(),
                 Icons.verified_rounded,
                 AdvantaColors.success,
               ),
             ],
           ),
           const SizedBox(height: 18),
-          Text('Menu Utama', style: _sectionTitle(context)),
+          Text('Menu $_activeModuleCode', style: _sectionTitle(context)),
           const SizedBox(height: 10),
           _buildMainMenuGrid(),
           const SizedBox(height: 18),
@@ -447,6 +1790,61 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildMainMenuGrid() {
+    final moduleActions = _activeModule == _InspectionModule.got
+        ? [
+            _MenuAction(
+              'Data Tanam',
+              'Master Data',
+              Icons.edit_calendar_rounded,
+              _GotFetPage.gotPlantingData,
+              logoAsset: _GotFetAssets.gotLogo,
+            ),
+            _MenuAction(
+              'Foto GOT',
+              'Evidence tanaman',
+              Icons.center_focus_strong_rounded,
+              _GotFetPage.gotPhoto,
+              logoAsset: _GotFetAssets.gotLogo,
+            ),
+            _MenuAction(
+              'Vegetatif',
+              'Result awal',
+              Icons.grass_rounded,
+              _GotFetPage.gotInput,
+              logoAsset: _GotFetAssets.gotLogo,
+            ),
+            _MenuAction(
+              'Generative',
+              'Hasil generative',
+              Icons.local_florist_rounded,
+              _GotFetPage.gotInput,
+              logoAsset: _GotFetAssets.gotLogo,
+            ),
+          ]
+        : [
+            _MenuAction(
+              'Plot Scanner',
+              'Foto plot 10x10',
+              Icons.grid_on_rounded,
+              _GotFetPage.fetPhoto,
+              logoAsset: _GotFetAssets.fetLogo,
+            ),
+            _MenuAction(
+              'Analisa Plot',
+              'Kroscek 10x10',
+              Icons.analytics_rounded,
+              _GotFetPage.fetAnalysis,
+              logoAsset: _GotFetAssets.fetLogo,
+            ),
+            _MenuAction(
+              'Input FET',
+              'Emergence',
+              Icons.edit_note_rounded,
+              _GotFetPage.fetInput,
+              logoAsset: _GotFetAssets.fetLogo,
+            ),
+          ];
+
     final actions = [
       _MenuAction(
         'Lot Tracking',
@@ -454,55 +1852,167 @@ class _GotFetScreenState extends State<GotFetScreen> {
         Icons.inventory_2_rounded,
         _GotFetPage.lotTracking,
       ),
+      ...moduleActions,
       _MenuAction(
-        'GOT Photo',
-        'Foto tanaman',
+        'Sinkronisasi',
+        'Submit real-time',
+        Icons.cloud_sync_rounded,
+        _GotFetPage.home,
+      ),
+    ];
+
+    return _buildActionGrid(
+      actions,
+      onAction: (action) {
+        if (action.page == _GotFetPage.home && action.title == 'Sinkronisasi') {
+          _showSnack('Data tersimpan ke Supabase saat Submit.');
+          return;
+        }
+        if (action.title == 'Vegetatif') {
+          _setGotObservationStage(_GotObservationStage.vegetative);
+        }
+        if (action.title == 'Generative') {
+          _setGotObservationStage(_GotObservationStage.finalGenerative);
+        }
+        _openPage(action.page);
+      },
+    );
+  }
+
+  Widget _buildGotWorkspacePage() {
+    final actions = [
+      _MenuAction(
+        'Data Tanam',
+        'Master Data',
+        Icons.edit_calendar_rounded,
+        _GotFetPage.gotPlantingData,
+      ),
+      _MenuAction(
+        'Foto GOT',
+        'Evidence tanaman',
         Icons.center_focus_strong_rounded,
         _GotFetPage.gotPhoto,
         logoAsset: _GotFetAssets.gotLogo,
       ),
       _MenuAction(
-        'GOT Input',
-        'Purity',
-        Icons.fact_check_rounded,
+        'Vegetatif',
+        'Result awal',
+        Icons.grass_rounded,
         _GotFetPage.gotInput,
         logoAsset: _GotFetAssets.gotLogo,
       ),
       _MenuAction(
-        'FET Scanner',
-        'Foto plot 5x10',
+        'Generative',
+        'Hasil generative',
+        Icons.local_florist_rounded,
+        _GotFetPage.gotInput,
+        logoAsset: _GotFetAssets.gotLogo,
+      ),
+      _MenuAction(
+        'Review GOT',
+        'Approve result',
+        Icons.verified_rounded,
+        _GotFetPage.gotReview,
+        logoAsset: _GotFetAssets.gotLogo,
+      ),
+    ];
+
+    return _PageScaffold(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _ModuleStrip(
+            logoAsset: _GotFetAssets.gotLogo,
+            title: 'Grow Out Test',
+            subtitle: 'Pilih fitur inspeksi GOT yang akan dikerjakan',
+          ),
+          const SizedBox(height: 18),
+          Text('Fitur GOT', style: _sectionTitle(context)),
+          const SizedBox(height: 10),
+          _buildActionGrid(
+            actions,
+            onAction: (action) {
+              if (action.title == 'Vegetatif') {
+                _setGotObservationStage(_GotObservationStage.vegetative);
+              }
+              if (action.title == 'Generative') {
+                _setGotObservationStage(_GotObservationStage.finalGenerative);
+              }
+              if (action.title == 'Review GOT') {
+                _openReviewModule(0);
+                return;
+              }
+              _openPage(action.page);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFetWorkspacePage() {
+    final actions = [
+      _MenuAction(
+        'Plot Scanner',
+        'Foto plot 10x10',
         Icons.grid_on_rounded,
         _GotFetPage.fetPhoto,
         logoAsset: _GotFetAssets.fetLogo,
       ),
       _MenuAction(
-        'FET Analisa',
-        'Auto count',
+        'Analisa Plot',
+        'Kroscek 10x10',
         Icons.analytics_rounded,
         _GotFetPage.fetAnalysis,
         logoAsset: _GotFetAssets.fetLogo,
       ),
       _MenuAction(
-        'FET Input',
+        'Input FET',
         'Emergence',
         Icons.edit_note_rounded,
         _GotFetPage.fetInput,
         logoAsset: _GotFetAssets.fetLogo,
       ),
       _MenuAction(
-        'Review Status',
-        'Approve',
+        'Review FET',
+        'Approve result',
         Icons.verified_rounded,
-        _GotFetPage.review,
-      ),
-      _MenuAction(
-        'Sinkronisasi',
-        'Draft lokal',
-        Icons.cloud_sync_rounded,
-        _GotFetPage.home,
+        _GotFetPage.fetReview,
+        logoAsset: _GotFetAssets.fetLogo,
       ),
     ];
 
+    return _PageScaffold(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _ModuleStrip(
+            logoAsset: _GotFetAssets.fetLogo,
+            title: 'Field Emergence Test',
+            subtitle: 'Pilih fitur inspeksi FET yang akan dikerjakan',
+          ),
+          const SizedBox(height: 18),
+          Text('Fitur FET', style: _sectionTitle(context)),
+          const SizedBox(height: 10),
+          _buildActionGrid(
+            actions,
+            onAction: (action) {
+              if (action.title == 'Review FET') {
+                _openReviewModule(1);
+                return;
+              }
+              _openPage(action.page);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionGrid(
+    List<_MenuAction> actions, {
+    void Function(_MenuAction action)? onAction,
+  }) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final columns = constraints.maxWidth >= 720
@@ -530,6 +2040,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
             return _MenuActionCard(
               action: action,
               onTap: () {
+                if (onAction != null) {
+                  onAction(action);
+                  return;
+                }
                 if (action.page == _GotFetPage.home &&
                     action.title == 'Sinkronisasi') {
                   _showSnack('Data tersimpan ke backend saat Submit.');
@@ -544,24 +2058,370 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Widget _buildBatchListView({
+    String? module,
+    void Function(int sampleIndex, String module)? onBatchTap,
+  }) {
+    final indexes = _sampleIndexesForModule(module);
+    var visibleCount = math.min(_batchListVisibleCount, indexes.length);
+    final selectedPosition = indexes.indexOf(_selectedSampleIndex);
+    if (selectedPosition >= visibleCount) {
+      visibleCount = selectedPosition + 1;
+    }
+    final visibleIndexes = indexes.take(visibleCount).toList();
+
+    if (indexes.isEmpty) {
+      return _PanelCard(
+        child: Row(
+          children: [
+            Icon(
+              Icons.view_list_rounded,
+              color: _gotFetMutedColor(context),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'List Batch akan muncul setelah got_fet_samples berisi data dari database.',
+                style: AdvantaText.body2.copyWith(
+                  color: _gotFetMutedColor(context),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        _PanelCard(
+          child: Row(
+            children: [
+              Icon(Icons.view_list_rounded, color: _GotFetUi.greenDark),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Menampilkan $visibleCount dari ${indexes.length} Batch $_activeModuleCode | tap batch untuk detail',
+                  style: AdvantaText.body2.copyWith(
+                    color: _gotFetMutedColor(context),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        for (var row = 0; row < visibleIndexes.length; row++) ...[
+          RepaintBoundary(
+            child: ValueListenableBuilder<int>(
+              valueListenable: _selectedSampleIndexNotifier,
+              builder: (context, selectedIndex, _) {
+                final sampleIndex = visibleIndexes[row];
+                final sample = _samples[sampleIndex];
+                return _BatchListItem(
+                  key: ValueKey('batch-${sample.batch}'),
+                  sample: sample,
+                  selected: sampleIndex == selectedIndex,
+                  statusColor: _statusColor(sample.status),
+                  observationLabel: _sampleObservationLabel(sample),
+                  observationColor: _sampleObservationColor(sample),
+                  plantingDate: _formatDate(sample.plantingDate),
+                  resultEstimation: _formatDate(sample.resultEstimation),
+                  fieldArea: _formatArea(sample.fieldArea),
+                  onTap: () {
+                    final resolvedModule = module ?? _activeModuleCode;
+                    if (onBatchTap != null) {
+                      onBatchTap(sampleIndex, resolvedModule);
+                      return;
+                    }
+                    _openBatchQuickActions(sampleIndex, resolvedModule);
+                  },
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+        if (visibleCount < indexes.length)
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.expand_more_rounded),
+              label: Text(
+                'Tampilkan ${math.min(_batchListPageSize, indexes.length - visibleCount)} lagi',
+              ),
+              onPressed: () {
+                setState(() {
+                  _batchListVisibleCount = math.min(
+                    _batchListVisibleCount + _batchListPageSize,
+                    indexes.length,
+                  );
+                });
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _buildLotTrackingPage() {
+    if (!_hasSamplesForModule(_activeModuleCode)) {
+      return _PageScaffold(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildSampleStatePanel(),
+            const SizedBox(height: 16),
+            Text('Daftar Batch', style: _sectionTitle(context)),
+            const SizedBox(height: 10),
+            _buildBatchListView(
+              module: _activeModuleCode,
+              onBatchTap: (index, _) => _selectBatchIndex(index),
+            ),
+            const SizedBox(height: 16),
+            Text('Menu $_activeModuleCode', style: _sectionTitle(context)),
+            const SizedBox(height: 10),
+            _buildMainMenuGrid(),
+          ],
+        ),
+      );
+    }
+
     return _PageScaffold(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSamplePicker(),
+          _buildSamplePicker(module: _activeModuleCode),
           const SizedBox(height: 12),
+          const _ModuleStrip(
+            logoAsset: _GotFetAssets.appLogo,
+            title: 'Lot Tracking',
+            subtitle:
+                'Pantau pengiriman, status sample, dan kesiapan benih sebelum tanam',
+          ),
+          const SizedBox(height: 16),
+          Text('Daftar Batch Pengiriman', style: _sectionTitle(context)),
+          const SizedBox(height: 10),
+          _buildBatchListView(
+            module: _activeModuleCode,
+            onBatchTap: (index, _) {
+              HapticFeedback.selectionClick();
+              _selectBatchIndex(index);
+              _openLotTrackingDetailSheet(index);
+            },
+          ),
+          const SizedBox(height: 16),
           _buildLotSummaryCard(),
+          const SizedBox(height: 16),
+          _buildShipmentInfoCard(),
           const SizedBox(height: 16),
           _buildTimelineCard(_selectedSample),
           const SizedBox(height: 16),
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton.icon(
-              icon: const Icon(Icons.visibility_rounded),
-              label: const Text('LIHAT DETAIL'),
-              onPressed: () => _openPage(_GotFetPage.review),
-            ),
+          _buildLotReviewActionCard(),
+          const SizedBox(height: 16),
+          _buildTrackingActionCard(),
+        ],
+      ),
+    );
+  }
+
+  void _openLotTrackingDetailSheet(int index) {
+    _selectBatchIndex(index);
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: _gotFetCardColor(context),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            return DraggableScrollableSheet(
+              expand: false,
+              initialChildSize: 0.88,
+              minChildSize: 0.55,
+              maxChildSize: 0.96,
+              builder: (context, scrollController) {
+                return ListView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Detail Tracking Batch',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AdvantaText.heading3.copyWith(
+                              color: _gotFetTextColor(context),
+                            ),
+                          ),
+                        ),
+                        _StatusPill(
+                          label: _selectedSample.status,
+                          color: _statusColor(_selectedSample.status),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    _buildLotSummaryCard(),
+                    const SizedBox(height: 12),
+                    _buildLotReviewActionCard(
+                      onSubmitted: () {
+                        setSheetState(() {});
+                        Navigator.of(sheetContext).pop();
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _buildTrackingActionCard(
+                      onConfirmed: () {
+                        setSheetState(() {});
+                        Navigator.of(sheetContext).pop();
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _buildShipmentInfoCard(),
+                    const SizedBox(height: 12),
+                    _buildTimelineCard(_selectedSample),
+                  ],
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildGotWorkflowCard() {
+    return _WorkflowProgressCard(
+      title: 'Alur GOT',
+      subtitle: _gotEvidenceReady
+          ? 'Evidence lengkap, hasil siap disubmit/review'
+          : _gotInputReady
+              ? 'Lengkapi evidence sesuai slot hasil pengamatan'
+              : 'Mulai dari data tanam dan input hasil pengamatan',
+      steps: [
+        _WorkflowStepData(
+          label: 'Tanam',
+          detail: _gotPlanningReady ? 'Lengkap' : 'Belum lengkap',
+          icon: Icons.edit_calendar_rounded,
+          done: _gotPlanningReady,
+          active: _page == _GotFetPage.gotPlantingData,
+        ),
+        _WorkflowStepData(
+          label: 'Input',
+          detail: _gotInputReady ? 'Ada hasil' : 'Belum ada',
+          icon: Icons.edit_note_rounded,
+          done: _gotInputReady,
+          active: _page == _GotFetPage.gotInput,
+        ),
+        _WorkflowStepData(
+          label: 'Evidence',
+          detail: _gotEvidenceSlots.isEmpty
+              ? 'Belum terbentuk'
+              : '$_gotEvidenceFilledCount/${_gotEvidenceSlots.length}',
+          icon: Icons.photo_library_rounded,
+          done: _gotEvidenceReady,
+          active: _page == _GotFetPage.gotPhoto,
+        ),
+        _WorkflowStepData(
+          label: 'Review',
+          detail: _selectedSample.status,
+          icon: Icons.verified_rounded,
+          done: _selectedSampleSubmittedOrReviewed,
+          active: _page == _GotFetPage.gotReview,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFetWorkflowCard() {
+    return _WorkflowProgressCard(
+      title: 'Alur FET U$_selectedReplication',
+      subtitle: _fetSubmittedReady
+          ? 'Hasil ulangan ini sudah tersimpan untuk review'
+          : _fetCheckReady
+              ? 'Kroscek selesai, lanjut submit hasil'
+              : 'Ambil foto plot lalu kroscek 100 titik',
+      steps: [
+        _WorkflowStepData(
+          label: 'Foto',
+          detail: _fetPhotoReady ? 'Siap' : 'Belum ada',
+          icon: Icons.camera_alt_rounded,
+          done: _fetPhotoReady,
+          active: _page == _GotFetPage.fetPhoto,
+        ),
+        _WorkflowStepData(
+          label: 'Kroscek',
+          detail: _fetCheckReady
+              ? '100 titik'
+              : '${_currentReplicationReview + _currentReplicationNotReadable} terbuka',
+          icon: Icons.grid_on_rounded,
+          done: _fetCheckReady,
+          active: _page == _GotFetPage.fetAnalysis,
+        ),
+        _WorkflowStepData(
+          label: 'Submit',
+          detail: _fetSubmittedReady ? 'Tersimpan' : 'Belum submit',
+          icon: Icons.send_rounded,
+          done: _fetSubmittedReady,
+          active: _page == _GotFetPage.fetInput,
+        ),
+        _WorkflowStepData(
+          label: 'Review',
+          detail: _selectedSample.status,
+          icon: Icons.verified_rounded,
+          done: _selectedSampleSubmittedOrReviewed,
+          active: _page == _GotFetPage.fetReview,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGotPlantingDataPage() {
+    if (!_hasSamplesForModule('GOT')) {
+      return _buildSampleRequiredPage();
+    }
+
+    return _PageScaffold(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSamplePicker(module: 'GOT'),
+          const SizedBox(height: 12),
+          const _ModuleStrip(
+            logoAsset: _GotFetAssets.gotLogo,
+            title: 'Data Tanam GOT',
+            subtitle:
+                'Input tanggal tanam, lokasi, area, status sample, dan estimasi hasil',
+          ),
+          const SizedBox(height: 12),
+          _buildGotWorkflowCard(),
+          const SizedBox(height: 12),
+          _buildLotIdentityCard(
+            extraRows: [
+              ('Batch', _selectedSample.batch),
+              ('Delivery Date 1', _formatDate(_selectedSample.deliveryDate1)),
+              ('Delivery Date 2', _formatDate(_selectedSample.deliveryDate2)),
+              ('Status Sample', _selectedSample.statusSample),
+            ],
+          ),
+          const SizedBox(height: 16),
+          _buildPlantingScheduleCard(),
+          const SizedBox(height: 16),
+          _buildManualDatabaseCard(),
+          const SizedBox(height: 16),
+          _DualActionBar(
+            leftLabel: 'Foto GOT',
+            rightLabel: 'Input Hasil',
+            leftIcon: Icons.center_focus_strong_rounded,
+            rightIcon: Icons.edit_note_rounded,
+            onLeft: () => _openPage(_GotFetPage.gotPhoto),
+            onRight: () => _openPage(_GotFetPage.gotInput),
           ),
         ],
       ),
@@ -573,46 +2433,37 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSamplePicker(),
+          _buildSamplePicker(module: 'GOT'),
           const SizedBox(height: 12),
           const _ModuleStrip(
             logoAsset: _GotFetAssets.gotLogo,
-            title: 'Grow Out Test',
-            subtitle: 'Field photo evidence and off-type observation',
+            title: 'GOT Photo Evidence',
+            subtitle: 'Foto tersimpan per lot, stage, kategori, dan RCVR',
           ),
           const SizedBox(height: 12),
-          _GuidanceBanner(
-            text: 'Ikuti panduan untuk foto yang valid',
-            color: AdvantaColors.success,
-          ),
-          const SizedBox(height: 10),
-          _CameraMockup(
-            mode: _CameraMockupMode.got,
-            title: 'Posisikan tanaman di dalam marker',
-            footer: 'Auto capture jika semua indikator OK',
-          ),
+          _buildGotWorkflowCard(),
           const SizedBox(height: 12),
-          _DualActionBar(
-            leftLabel: 'Gallery',
-            rightLabel: 'Capture',
-            leftIcon: Icons.photo_library_rounded,
-            rightIcon: Icons.camera_alt_rounded,
-            onLeft: () => _pickGotEvidence(ImageSource.gallery),
-            onRight: () => _pickGotEvidence(ImageSource.camera),
-          ),
-          const SizedBox(height: 12),
-          _IndicatorGrid(
-            items: const [
-              ('Angle', 'OK', Icons.screen_rotation_alt_rounded),
-              ('Focus', 'OK', Icons.center_focus_strong_rounded),
-              ('Jarak', 'OK', Icons.straighten_rounded),
-              ('Cahaya', 'OK', Icons.wb_sunny_rounded),
+          _buildLotIdentityCard(
+            extraRows: [
+              ('Batch', _selectedSample.batch),
+              ('Plot', _gotPlotId),
+              ('Stage Observasi', _gotObservationStageLabel),
+              ('No. Obs Target', _gotObservationNumber),
             ],
           ),
-          if (_gotEvidencePhotos.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _buildPhotoEvidenceRow(),
-          ],
+          const SizedBox(height: 12),
+          _buildGotStageSelector(),
+          const SizedBox(height: 12),
+          _buildGotObservationSyncStatus(),
+          const SizedBox(height: 12),
+          _GuidanceBanner(
+            text: 'Folder evidence dibuat otomatis dari jumlah input hasil GOT',
+            color: AdvantaColors.success,
+          ),
+          const SizedBox(height: 12),
+          _buildSmartCameraStatusCard(module: 'GOT'),
+          const SizedBox(height: 12),
+          _buildGotEvidenceFolders(),
         ],
       ),
     );
@@ -623,7 +2474,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSamplePicker(),
+          _buildSamplePicker(module: 'GOT'),
           const SizedBox(height: 12),
           const _ModuleStrip(
             logoAsset: _GotFetAssets.gotLogo,
@@ -631,16 +2482,22 @@ class _GotFetScreenState extends State<GotFetScreen> {
             subtitle: 'Input hasil purity dan evidence tanaman',
           ),
           const SizedBox(height: 12),
+          _buildGotWorkflowCard(),
+          const SizedBox(height: 12),
           _buildLotIdentityCard(
-            extraRows: const [
-              ('Plot', 'G1 - U1'),
-              ('Stage', 'Flowering'),
+            extraRows: [
+              ('Batch', _selectedSample.batch),
+              ('Plot', _gotPlotId),
+              ('Stage Observasi', _gotObservationStageLabel),
+              ('No. Obs Target', _gotObservationNumber),
             ],
           ),
           const SizedBox(height: 14),
+          _buildGotStageSelector(),
+          const SizedBox(height: 12),
           _buildGotCountForm(),
           const SizedBox(height: 12),
-          _buildPhotoEvidenceRow(),
+          _buildGotEvidenceSummaryCard(),
           const SizedBox(height: 12),
           _buildNoteBox(controller: _gotNoteController),
           const SizedBox(height: 16),
@@ -663,45 +2520,82 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSamplePicker(),
+          _buildSamplePicker(module: 'FET'),
           const SizedBox(height: 12),
           const _ModuleStrip(
             logoAsset: _GotFetAssets.fetLogo,
             title: 'Field Emergence Test',
-            subtitle: 'Plot scanner for 5 x 10 emergence count',
+            subtitle: 'Plot scanner for 10 x 10 emergence count',
           ),
           const SizedBox(height: 12),
+          _buildFetWorkflowCard(),
+          const SizedBox(height: 12),
           _GuidanceBanner(
-            text: 'Posisikan seluruh plot 5x10 terfoto jelas',
+            text: 'Posisikan seluruh plot 10x10 terfoto jelas',
             color: AdvantaColors.success,
           ),
+          const SizedBox(height: 10),
+          _buildSmartCameraStatusCard(module: 'FET'),
           const SizedBox(height: 10),
           _buildReplicationSelector(),
           const SizedBox(height: 10),
           _CameraMockup(
             mode: _CameraMockupMode.fet,
             title: 'Sejajarkan plot dengan bingkai',
-            footer: '50 titik tanam akan dianalisis otomatis',
+            footer: '100 titik tanam siap dikroscek dari foto',
           ),
           const SizedBox(height: 12),
-          _DualActionBar(
-            leftLabel: _fetPlotPhoto == null ? 'Upload' : 'Ganti',
-            rightLabel: _fetPlotPhoto == null ? 'Capture' : 'Analisa',
-            leftIcon: Icons.photo_library_rounded,
-            rightIcon: _fetPlotPhoto == null
-                ? Icons.camera_alt_rounded
-                : Icons.analytics_rounded,
-            onLeft: () => _pickFetPlotPhoto(ImageSource.gallery),
-            onRight: _fetPlotPhoto == null
-                ? () => _pickFetPlotPhoto(ImageSource.camera)
-                : () => _openPage(_GotFetPage.fetAnalysis),
-          ),
-          if (_fetPlotPhoto != null) ...[
+          _buildFetPhotoActionBar(),
+          if (_currentFetPlotPhoto != null) ...[
             const SizedBox(height: 12),
             _buildPlotEvidenceCard(),
           ],
         ],
       ),
+    );
+  }
+
+  Widget _buildFetPhotoActionBar() {
+    final hasPhoto = _currentFetPlotPhoto != null;
+
+    return Row(
+      children: [
+        Expanded(
+          child: ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _GotFetUi.green,
+              foregroundColor: Colors.white,
+            ),
+            icon: Icon(
+              hasPhoto ? Icons.analytics_rounded : Icons.camera_alt_rounded,
+            ),
+            label: Text(hasPhoto ? 'Kroscek Foto' : 'Ambil Foto'),
+            onPressed: hasPhoto
+                ? () => _openPage(_GotFetPage.fetAnalysis)
+                : () => _pickFetPlotPhoto(
+                      ImageSource.camera,
+                      openAnalysisAfterPick: true,
+                    ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        if (hasPhoto) ...[
+          IconButton.filledTonal(
+            tooltip: 'Ganti dari kamera',
+            onPressed: () => _pickFetPlotPhoto(
+              ImageSource.camera,
+              openAnalysisAfterPick: true,
+            ),
+            icon: const Icon(Icons.camera_alt_rounded),
+          ),
+          const SizedBox(width: 8),
+        ],
+        IconButton.filledTonal(
+          tooltip: hasPhoto ? 'Ganti dari gallery' : 'Upload dari gallery',
+          onPressed: () => _pickFetPlotPhoto(ImageSource.gallery),
+          icon: const Icon(Icons.photo_library_rounded),
+        ),
+      ],
     );
   }
 
@@ -715,6 +2609,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
             title: 'Field Emergence Test',
             subtitle: 'Review hasil analisa plot per ulangan',
           ),
+          const SizedBox(height: 12),
+          _buildFetWorkflowCard(),
           const SizedBox(height: 12),
           _buildReplicationSelector(),
           const SizedBox(height: 14),
@@ -737,7 +2633,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             ],
           ),
           const SizedBox(height: 16),
-          _buildFetGridCard(showLabel: false),
+          _buildFetPhotoReviewCard(),
           const SizedBox(height: 12),
           _buildFetLegend(),
           const SizedBox(height: 16),
@@ -760,7 +2656,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSamplePicker(),
+          _buildSamplePicker(module: 'FET'),
           const SizedBox(height: 12),
           const _ModuleStrip(
             logoAsset: _GotFetAssets.fetLogo,
@@ -768,9 +2664,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
             subtitle: 'Final emergence result and submission',
           ),
           const SizedBox(height: 12),
+          _buildFetWorkflowCard(),
+          const SizedBox(height: 12),
+          _buildReplicationSelector(),
+          const SizedBox(height: 12),
           _buildLotIdentityCard(
             extraRows: [
-              ('Plot', 'F1 - U1'),
+              ('Plot', _fetPlotId),
               ('DAP', '7'),
               ('Ulangan', '$_selectedReplication'),
             ],
@@ -797,101 +2697,367 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildReviewPage() {
+    return _reviewSegment == 0 ? _buildGotReviewPage() : _buildFetReviewPage();
+  }
+
+  Widget _buildGotReviewPage() {
     return _PageScaffold(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment<int>(value: 0, label: Text('GOT')),
-              ButtonSegment<int>(value: 1, label: Text('FET')),
-            ],
-            selected: {_reviewSegment},
-            onSelectionChanged: (selection) {
-              setState(() => _reviewSegment = selection.first);
-            },
+          _buildSamplePicker(module: 'GOT'),
+          const SizedBox(height: 12),
+          const _ModuleStrip(
+            logoAsset: _GotFetAssets.gotLogo,
+            title: 'Review GOT',
+            subtitle: 'Review purity, offtype, selfing, male, dan evidence',
           ),
           const SizedBox(height: 12),
+          _buildGotWorkflowCard(),
+          const SizedBox(height: 12),
           _buildLotIdentityCard(
-            extraRows: _reviewSegment == 0
-                ? const [
-                    ('Plot', 'G1 - U1'),
-                    ('Stage', 'Flowering'),
-                  ]
-                : const [
-                    ('Plot', 'F1 - U1'),
-                    ('DAP', '7'),
-                  ],
+            extraRows: [
+              ('Batch', _selectedSample.batch),
+              ('Plot', _gotPlotId),
+              ('Stage Observasi', _gotObservationStageLabel),
+              ('No. Obs Target', _gotObservationNumber),
+            ],
           ),
+          const SizedBox(height: 12),
+          _buildGotStageSelector(),
           const SizedBox(height: 14),
-          _reviewSegment == 0
-              ? _buildGotReviewResult()
-              : _buildFetReviewResult(),
+          _buildGotReviewResult(),
           const SizedBox(height: 14),
           _buildReviewTimeline(),
           const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _isSyncing
-                      ? null
-                      : () => _submitReviewDecision('Rejected'),
-                  child: const Text('Tolak'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _isSyncing
-                      ? null
-                      : () => _submitReviewDecision('Revision Required'),
-                  child: const Text('Revisi'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: _isSyncing
-                      ? null
-                      : () => _submitReviewDecision('Approved'),
-                  child: const Text('Approve'),
-                ),
-              ),
-            ],
-          ),
+          _buildReviewDecisionActions(),
         ],
       ),
     );
   }
 
-  Widget _buildSamplePicker() {
-    final theme = Theme.of(context);
-
-    return DropdownButtonFormField<int>(
-      key: ValueKey('got-fet-sample-$_selectedSampleIndex'),
-      initialValue: _selectedSampleIndex,
-      decoration: InputDecoration(
-        labelText: 'Lot / Sample',
-        prefixIcon: const Icon(Icons.qr_code_2_rounded),
-        filled: true,
-        fillColor: theme.inputDecorationTheme.fillColor,
-      ),
-      items: [
-        for (var i = 0; i < _samples.length; i++)
-          DropdownMenuItem<int>(
-            value: i,
-            child: Text(
-              '${_samples[i].lotId} - ${_samples[i].testType}',
-              overflow: TextOverflow.ellipsis,
-            ),
+  Widget _buildFetReviewPage() {
+    return _PageScaffold(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSamplePicker(module: 'FET'),
+          const SizedBox(height: 12),
+          const _ModuleStrip(
+            logoAsset: _GotFetAssets.fetLogo,
+            title: 'Review FET',
+            subtitle: 'Review emergence, titik tanam, dan evidence plot',
           ),
+          const SizedBox(height: 12),
+          _buildFetWorkflowCard(),
+          const SizedBox(height: 12),
+          _buildReplicationSelector(),
+          const SizedBox(height: 12),
+          _buildLotIdentityCard(
+            extraRows: [
+              ('Batch', _selectedSample.batch),
+              ('Plot', _fetPlotId),
+              ('DAP', '7'),
+              ('Ulangan', '$_selectedReplication'),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _buildFetReviewResult(),
+          const SizedBox(height: 14),
+          _buildFetReviewVisualCard(),
+          const SizedBox(height: 14),
+          _buildReviewTimeline(),
+          const SizedBox(height: 16),
+          _buildReviewDecisionActions(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReviewDecisionActions() {
+    return Row(
+      children: [
+        Expanded(
+          child: OutlinedButton.icon(
+            onPressed: _isSyncing
+                ? null
+                : () => _submitReviewDecision(
+                      'Revision Required',
+                      displayStatus: 'Need Review',
+                    ),
+            icon: const Icon(Icons.rate_review_rounded),
+            label: const Text('Need Review'),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: ElevatedButton.icon(
+            onPressed: _isSyncing
+                ? null
+                : () => _submitReviewDecision(
+                      'Approved',
+                      displayStatus: 'Confirmed',
+                    ),
+            icon: const Icon(Icons.verified_rounded),
+            label: const Text('Confirmed'),
+          ),
+        ),
       ],
-      onChanged: (value) {
-        if (value == null) return;
-        setState(() => _selectedSampleIndex = value);
+    );
+  }
+
+  Widget _buildSamplePicker({String? module}) {
+    final theme = Theme.of(context);
+    final sampleIndexes = _sampleIndexesForModule(module);
+    final selectedValue = sampleIndexes.contains(_selectedSampleIndex)
+        ? _selectedSampleIndex
+        : null;
+
+    final selectedSample =
+        selectedValue == null ? null : _samples[selectedValue];
+
+    return Material(
+      key: ValueKey('got-fet-sample-$module-$_selectedSampleIndex'),
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: sampleIndexes.isEmpty
+            ? null
+            : () => _openSampleSearchSheet(module: module),
+        borderRadius: AdvantaRadius.inputRadius,
+        child: InputDecorator(
+          isEmpty: selectedSample == null,
+          decoration: InputDecoration(
+            labelText: module == null ? 'Lot / Sample' : '$module Lot / Sample',
+            prefixIcon: const Icon(Icons.search_rounded),
+            suffixIcon: const Icon(Icons.keyboard_arrow_down_rounded),
+            filled: true,
+            fillColor: theme.inputDecorationTheme.fillColor,
+          ),
+          child: selectedSample == null
+              ? Text(
+                  sampleIndexes.isEmpty
+                      ? 'Tidak ada lot/sample'
+                      : 'Cari Lot ID, Batch, Hybrid, atau Status',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.body2.copyWith(
+                    color: _gotFetMutedColor(context),
+                  ),
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '${selectedSample.lotId} - ${selectedSample.batch}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      [
+                        selectedSample.hybrid,
+                        selectedSample.category,
+                        selectedSample.processStage,
+                      ].where((value) => value.trim().isNotEmpty).join(' | '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openSampleSearchSheet({String? module}) async {
+    final sampleIndexes = _sampleIndexesForModule(module);
+    if (sampleIndexes.isEmpty) return;
+
+    final controller = TextEditingController();
+    var activeFilter = 'Semua';
+    final filterOptions = [
+      'Semua',
+      'Fresh',
+      'Resample',
+      'Open',
+      'Submitted',
+      'Approved',
+    ];
+
+    final selectedIndex = await showModalBottomSheet<int>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: _gotFetCardColor(context),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final query = controller.text.trim();
+            final filteredIndexes = [
+              for (final index in sampleIndexes)
+                if (_sampleMatchesQuery(_samples[index], query) &&
+                    _sampleMatchesFilter(_samples[index], activeFilter))
+                  index,
+            ];
+            final visibleIndexes = filteredIndexes.take(80).toList();
+            final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+
+            return Padding(
+              padding: EdgeInsets.fromLTRB(16, 0, 16, 16 + bottomInset),
+              child: SizedBox(
+                height: MediaQuery.sizeOf(context).height * 0.78,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      module == null
+                          ? 'Cari Lot / Sample'
+                          : 'Cari $module Lot / Sample',
+                      style: AdvantaText.heading3.copyWith(
+                        color: _strongTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      textInputAction: TextInputAction.search,
+                      decoration: InputDecoration(
+                        hintText: 'Lot ID, Batch, Hybrid, Lokasi, Status...',
+                        prefixIcon: const Icon(Icons.search_rounded),
+                        suffixIcon: query.isEmpty
+                            ? null
+                            : IconButton(
+                                tooltip: 'Bersihkan pencarian',
+                                onPressed: () {
+                                  controller.clear();
+                                  setSheetState(() {});
+                                },
+                                icon: const Icon(Icons.close_rounded),
+                              ),
+                        filled: true,
+                        fillColor:
+                            Theme.of(context).inputDecorationTheme.fillColor,
+                      ),
+                      onChanged: (_) => setSheetState(() {}),
+                    ),
+                    const SizedBox(height: 12),
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final filter in filterOptions) ...[
+                            ChoiceChip(
+                              label: Text(filter),
+                              selected: activeFilter == filter,
+                              onSelected: (_) {
+                                setSheetState(() => activeFilter = filter);
+                              },
+                            ),
+                            const SizedBox(width: 8),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      filteredIndexes.length > visibleIndexes.length
+                          ? 'Menampilkan ${visibleIndexes.length} dari ${filteredIndexes.length} hasil. Persempit pencarian untuk hasil lebih spesifik.'
+                          : '${filteredIndexes.length} hasil ditemukan',
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Expanded(
+                      child: filteredIndexes.isEmpty
+                          ? Center(
+                              child: Text(
+                                'Lot/sample tidak ditemukan',
+                                style: AdvantaText.bodyBold.copyWith(
+                                  color: _gotFetMutedColor(context),
+                                ),
+                              ),
+                            )
+                          : ListView.separated(
+                              keyboardDismissBehavior:
+                                  ScrollViewKeyboardDismissBehavior.onDrag,
+                              itemCount: visibleIndexes.length,
+                              separatorBuilder: (_, __) =>
+                                  const SizedBox(height: 8),
+                              itemBuilder: (context, position) {
+                                final index = visibleIndexes[position];
+                                return _SampleSearchTile(
+                                  sample: _samples[index],
+                                  isSelected: index == _selectedSampleIndex,
+                                  statusColor:
+                                      _statusColor(_samples[index].status),
+                                  onTap: () =>
+                                      Navigator.of(sheetContext).pop(index),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
       },
     );
+
+    controller.dispose();
+
+    if (selectedIndex == null) return;
+    HapticFeedback.selectionClick();
+    _selectBatchIndex(selectedIndex);
+  }
+
+  bool _sampleMatchesQuery(_GotFetSample sample, String query) {
+    if (query.isEmpty) return true;
+
+    final normalizedQuery = query.toLowerCase();
+    return [
+      sample.lotId,
+      sample.sampleId,
+      sample.batch,
+      sample.hybrid,
+      sample.gender,
+      sample.typeSeed,
+      sample.category,
+      sample.cropYear.toString(),
+      sample.processStage,
+      sample.testType,
+      sample.status,
+      sample.statusSample,
+      sample.location,
+      sample.flagging,
+      sample.reasonTesting,
+      sample.noteSample,
+      sample.pic,
+    ].any((value) => value.toLowerCase().contains(normalizedQuery));
+  }
+
+  bool _sampleMatchesFilter(_GotFetSample sample, String filter) {
+    if (filter == 'Semua') return true;
+
+    final normalizedFilter = filter.toLowerCase();
+    final searchableStatus = [
+      sample.status,
+      sample.statusSample,
+      sample.noteTanam,
+    ].join(' ').toLowerCase();
+
+    return searchableStatus.contains(normalizedFilter);
   }
 
   Widget _buildLotSummaryCard() {
@@ -936,12 +3102,339 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Widget _buildShipmentInfoCard() {
+    final sample = _selectedSample;
+    final commercialQty = sample.commercialQtyInventory == null
+        ? '-'
+        : _formatNumber(sample.commercialQtyInventory!);
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Data Pengiriman',
+            style: AdvantaText.heading3.copyWith(
+              color: _strongTextColor(context),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _InfoRow(label: 'Batch', value: sample.batch),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Process Stage', value: sample.processStage),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Qty by DSS', value: _formatNumber(sample.qtyByDss)),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Commercial Qty Inventory', value: commercialQty),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Delivery Date 1',
+              value: _formatDate(sample.deliveryDate1)),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Delivery Date 2',
+              value: _formatDate(sample.deliveryDate2)),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Flagging', value: sample.flagging),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Reason Testing', value: sample.reasonTesting),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Status Sample', value: sample.statusSample),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTrackingActionCard({VoidCallback? onConfirmed}) {
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Konfirmasi Tracking',
+            style: AdvantaText.heading3.copyWith(
+              color: _strongTextColor(context),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Gunakan tombol ini untuk mencatat progress pengiriman sample sebelum masuk proses tanam.',
+            style: AdvantaText.body2.copyWith(
+              color: _gotFetMutedColor(context),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.move_to_inbox_rounded),
+                  label: const Text('Diterima'),
+                  onPressed: _isSyncing
+                      ? null
+                      : () => _confirmTrackingStatus(
+                            'Received',
+                            onConfirmed: onConfirmed,
+                          ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.grass_rounded),
+                  label: const Text('Siap Tanam'),
+                  onPressed: _isSyncing
+                      ? null
+                      : () => _confirmTrackingStatus(
+                            'Ready to Plant',
+                            onConfirmed: onConfirmed,
+                          ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLotReviewActionCard({VoidCallback? onSubmitted}) {
+    final module = _activeModuleCode;
+    final sample = _selectedSample;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Review Lot $module',
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: _sampleObservationLabel(sample),
+                color: _sampleObservationColor(sample),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Gunakan setelah hasil pengamatan lot ini dicek ulang.',
+            style: AdvantaText.body2.copyWith(
+              color: _gotFetMutedColor(context),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.rate_review_rounded),
+                  label: const Text('Need Review'),
+                  onPressed: _isSyncing
+                      ? null
+                      : () => _submitReviewDecision(
+                            'Revision Required',
+                            displayStatus: 'Need Review',
+                            onSubmitted: onSubmitted,
+                          ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.verified_rounded),
+                  label: const Text('Confirmed'),
+                  onPressed: _isSyncing
+                      ? null
+                      : () => _submitReviewDecision(
+                            'Approved',
+                            displayStatus: 'Confirmed',
+                            onSubmitted: onSubmitted,
+                          ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildManualDatabaseCard() {
+    final sample = _selectedSample;
+    final commercialQty = sample.commercialQtyInventory == null
+        ? '-'
+        : _formatNumber(sample.commercialQtyInventory!);
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Data Admin Lab',
+              style: AdvantaText.heading3.copyWith(
+                color: _strongTextColor(context),
+              )),
+          const SizedBox(height: 12),
+          _InfoRow(label: 'Batch', value: sample.batch),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Gender', value: sample.gender),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Type Seed', value: sample.typeSeed),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Category', value: sample.category),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Crop Year', value: sample.cropYear.toString()),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Process Stage', value: sample.processStage),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Qty by DSS', value: _formatNumber(sample.qtyByDss)),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Commercial Qty Inventory', value: commercialQty),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Flagging', value: sample.flagging),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Reason Testing', value: sample.reasonTesting),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Delivery Date 1',
+              value: _formatDate(sample.deliveryDate1)),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Delivery Date 2',
+              value: _formatDate(sample.deliveryDate2)),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Status GOT 2', value: sample.statusGot2),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Payment', value: sample.payment),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlantingScheduleCard() {
+    final sample = _selectedSample;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Input Tim GOT',
+              style: AdvantaText.heading3.copyWith(
+                color: _strongTextColor(context),
+              )),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.calendar_month_rounded),
+              label: Text('Planting Date: ${_formatDate(sample.plantingDate)}'),
+              onPressed: _pickPlantingDate,
+            ),
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Week Of Planting',
+              value: sample.weekOfPlanting?.toString() ?? '-'),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Result Estimation',
+              value: _formatDate(sample.resultEstimation)),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Week of Result Est.',
+              value: sample.weekOfResultEstimation?.toString() ?? '-'),
+          const SizedBox(height: 12),
+          _buildGotDropdown<String>(
+            label: 'Note Tanam',
+            value: sample.noteTanam,
+            options: _gotNoteTanamOptions,
+            text: (value) => value,
+            onChanged: (value) {
+              setState(() => sample.noteTanam = value);
+              _persistSelectedSamplePlanning();
+            },
+          ),
+          const SizedBox(height: 10),
+          _buildGotDropdown<String>(
+            label: 'Location',
+            value: sample.location,
+            options: _gotLocationOptions,
+            text: (value) => value,
+            onChanged: (value) {
+              setState(() => sample.location = value);
+              _persistSelectedSamplePlanning();
+            },
+          ),
+          const SizedBox(height: 10),
+          _buildGotDropdown<double>(
+            label: 'Field Area',
+            value: sample.fieldArea,
+            options: _gotFieldAreaOptions,
+            text: _formatArea,
+            onChanged: (value) {
+              setState(() => sample.fieldArea = value);
+              _persistSelectedSamplePlanning();
+            },
+          ),
+          const SizedBox(height: 10),
+          _buildGotDropdown<String>(
+            label: 'Status Sample',
+            value: sample.statusSample,
+            options: _gotStatusSampleOptions,
+            text: (value) => value,
+            onChanged: (value) {
+              setState(() => sample.statusSample = value);
+              _persistSelectedSamplePlanning();
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGotDropdown<T>({
+    required String label,
+    required T? value,
+    required List<T> options,
+    required String Function(T value) text,
+    required ValueChanged<T> onChanged,
+  }) {
+    return DropdownButtonFormField<T>(
+      key: ValueKey('got-dropdown-$label-$value'),
+      initialValue: options.contains(value) ? value : null,
+      decoration: InputDecoration(
+        labelText: label,
+        filled: true,
+        fillColor: Theme.of(context).inputDecorationTheme.fillColor,
+      ),
+      items: [
+        for (final option in options)
+          DropdownMenuItem<T>(
+            value: option,
+            child: Text(text(option), overflow: TextOverflow.ellipsis),
+          ),
+      ],
+      onChanged: (value) {
+        if (value == null) return;
+        onChanged(value);
+      },
+    );
+  }
+
   Widget _buildLotIdentityCard({
     required List<(String, String)> extraRows,
   }) {
     final rows = [
       ('Lot ID', _selectedSample.lotId),
       ('Hybrid', _selectedSample.hybrid),
+      ('Category', _selectedSample.category),
+      ('Location', _selectedSample.location),
       ...extraRows,
     ];
 
@@ -953,6 +3446,28 @@ class _GotFetScreenState extends State<GotFetScreen> {
             if (i != rows.length - 1) const SizedBox(height: 9),
           ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildGotStageSelector() {
+    return SizedBox(
+      width: double.infinity,
+      child: SegmentedButton<_GotObservationStage>(
+        segments: const [
+          ButtonSegment<_GotObservationStage>(
+            value: _GotObservationStage.vegetative,
+            label: Text('Vegetatif'),
+          ),
+          ButtonSegment<_GotObservationStage>(
+            value: _GotObservationStage.finalGenerative,
+            label: Text('Generative'),
+          ),
+        ],
+        selected: {_gotObservationStage},
+        onSelectionChanged: (selection) {
+          _setGotObservationStage(selection.first);
+        },
       ),
     );
   }
@@ -988,90 +3503,499 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 color: _strongTextColor(context),
               )),
           const SizedBox(height: 12),
+          _buildGotObservationSyncStatus(),
+          const SizedBox(height: 12),
           _CounterRow(
             label: 'Total Tanaman Diamati',
             value: _gotTotalObserved,
+            controller: _gotTotalObservedController,
             onAdd: () => _adjustGotCount('total', 1),
             onRemove: () => _adjustGotCount('total', -1),
+            onChanged: (value) => _setGotCountFromText('total', value),
           ),
           _CounterRow(
             label: 'Off-type',
             value: _gotOffType,
+            controller: _gotOffTypeController,
             onAdd: () => _adjustGotCount('offType', 1),
             onRemove: () => _adjustGotCount('offType', -1),
+            onChanged: (value) => _setGotCountFromText('offType', value),
           ),
           _CounterRow(
             label: 'Selfing',
             value: _gotSelfing,
+            controller: _gotSelfingController,
             onAdd: () => _adjustGotCount('selfing', 1),
             onRemove: () => _adjustGotCount('selfing', -1),
+            onChanged: (value) => _setGotCountFromText('selfing', value),
           ),
           _CounterRow(
             label: 'Male',
             value: _gotMale,
+            controller: _gotMaleController,
             onAdd: () => _adjustGotCount('male', 1),
             onRemove: () => _adjustGotCount('male', -1),
+            onChanged: (value) => _setGotCountFromText('male', value),
           ),
           _CounterRow(
             label: 'Tanaman Meragukan',
             value: _gotSuspicious,
+            controller: _gotSuspiciousController,
             onAdd: () => _adjustGotCount('suspicious', 1),
             onRemove: () => _adjustGotCount('suspicious', -1),
+            onChanged: (value) => _setGotCountFromText('suspicious', value),
           ),
           const Divider(height: 26),
           _InfoRow(
             label: 'Purity (%)',
             value: _gotCountsValid ? _gotPurity.toStringAsFixed(2) : 'Invalid',
-            valueColor:
-                _gotCountsValid ? AdvantaColors.success : AdvantaColors.error,
+            valueColor: _gotCountsValid ? _gotResultColor : AdvantaColors.error,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Acuan PASS',
+            value: _gotPassFailReference,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Status Hasil',
+            value: _gotResultLabel,
+            valueColor: _gotResultColor,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Offtype (%)',
+              value: _gotCountsValid
+                  ? _gotOffTypePercent.toStringAsFixed(2)
+                  : 'Invalid'),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Selfing (%)',
+              value: _gotCountsValid
+                  ? _gotSelfingPercent.toStringAsFixed(2)
+                  : 'Invalid'),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Male (%)',
+              value: _gotCountsValid
+                  ? _gotMalePercent.toStringAsFixed(2)
+                  : 'Invalid'),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Total (%)',
+              value: _gotCountsValid ? '100.00' : 'Invalid'),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Kolom Status Manual', value: _gotStatusColumnLabel),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGotObservationSyncStatus() {
+    final isError = _gotObservationLoadError != null;
+    final icon = isError
+        ? Icons.cloud_off_rounded
+        : _isLoadingGotObservation
+            ? Icons.cloud_sync_rounded
+            : _hasPersistedGotObservation
+                ? Icons.cloud_done_rounded
+                : Icons.add_circle_outline_rounded;
+    final color = isError
+        ? AdvantaColors.error
+        : _isLoadingGotObservation
+            ? AdvantaColors.warning
+            : _hasPersistedGotObservation
+                ? AdvantaColors.success
+                : _gotFetMutedColor(context);
+    final text = isError
+        ? 'Gagal memuat input database: $_gotObservationLoadError'
+        : _isLoadingGotObservation
+            ? 'Memuat input terakhir dari database...'
+            : _hasPersistedGotObservation
+                ? 'Menggunakan input tersimpan dari database. Tetap bisa diedit.'
+                : 'Belum ada input tersimpan. Counter dimulai dari 0.';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withAlpha(_gotFetIsDark(context) ? 42 : 22),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withAlpha(90)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AdvantaText.caption.copyWith(
+                color: _gotFetTextColor(context),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildPhotoEvidenceRow() {
-    final previewPhotos = _gotEvidencePhotos.take(3).toList();
-    final emptySlots = math.max(0, 3 - previewPhotos.length);
+  Widget _buildGotEvidenceSummaryCard() {
+    final slots = _gotEvidenceSlots;
+    final filledCount = [
+      for (final slot in slots)
+        if (_gotEvidenceBySlot.containsKey(slot.key)) slot,
+    ].length;
+
+    return _PanelCard(
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: AdvantaColors.green.withAlpha(
+                _gotFetIsDark(context) ? 44 : 22,
+              ),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(
+              Icons.photo_library_rounded,
+              color: AdvantaColors.greenDark,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Foto Evidence GOT',
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _gotFetTextColor(context),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  slots.isEmpty
+                      ? 'Isi hasil pengamatan untuk membentuk folder evidence.'
+                      : '$filledCount dari ${slots.length} slot evidence terisi',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.caption.copyWith(
+                    color: _gotFetMutedColor(context),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          IconButton.filledTonal(
+            tooltip: 'Buka Foto GOT',
+            onPressed: () => _openPage(_GotFetPage.gotPhoto),
+            icon: const Icon(Icons.arrow_forward_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSmartCameraStatusCard({required String module}) {
+    final pending = _smartPhotoStatus.pendingUploads;
+    final isDark = _gotFetIsDark(context);
+    final color = pending == 0 ? AdvantaColors.success : AdvantaColors.warning;
+    final lastQueuedText = _smartPhotoStatus.lastQueuedAt == null
+        ? null
+        : _dateTimeFormat.format(_smartPhotoStatus.lastQueuedAt!.toLocal());
+    final fetMetadata = _currentFetPlotPhotoMetadata;
+    final fetSummary = module == 'FET' && fetMetadata != null
+        ? fetMetadata.warnings.isEmpty
+            ? 'Foto plot lolos smart check'
+            : 'Cek plot: ${fetMetadata.warnings.join(', ')}'
+        : null;
 
     return _PanelCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Foto Evidence',
-              style: AdvantaText.heading3.copyWith(
-                color: _strongTextColor(context),
-              )),
-          const SizedBox(height: 10),
           Row(
             children: [
-              for (var i = 0; i < previewPhotos.length; i++) ...[
-                Expanded(
-                  child: _EvidencePhotoThumb(
-                    file: previewPhotos[i],
-                    onRemove: () => _removeGotEvidence(previewPhotos[i]),
-                  ),
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: color.withAlpha(isDark ? 44 : 22),
+                  borderRadius: BorderRadius.circular(13),
                 ),
-                const SizedBox(width: 8),
-              ],
-              for (var i = 0; i < emptySlots; i++) ...[
-                const Expanded(child: _PhotoThumb()),
-                const SizedBox(width: 8),
-              ],
+                child: Icon(Icons.auto_awesome_rounded, color: color),
+              ),
+              const SizedBox(width: 12),
               Expanded(
-                child: OutlinedButton(
-                  onPressed: () => _showEvidenceSourceSheet(
-                    onCamera: () => _pickGotEvidence(ImageSource.camera),
-                    onGallery: () => _pickGotEvidence(ImageSource.gallery),
-                  ),
-                  child: const Icon(Icons.add_rounded),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Smart Camera $module',
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      pending == 0
+                          ? (fetSummary ??
+                              'Quality check, duplicate guard, watermark metadata aktif')
+                          : '$pending foto menunggu sync${lastQueuedText == null ? '' : ' | $lastQueuedText'}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
                 ),
               ),
+              const SizedBox(width: 10),
+              IconButton.filledTonal(
+                tooltip: 'Sync foto offline',
+                onPressed: _isRetryingPhotoQueue
+                    ? null
+                    : () => _drainSmartPhotoQueue(showResult: true),
+                icon: _isRetryingPhotoQueue
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.cloud_sync_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _StatusPill(label: 'Offline queue', color: color),
+              _StatusPill(
+                  label: 'Blur/gelap check', color: AdvantaColors.green),
+              _StatusPill(label: 'Duplicate hash', color: AdvantaColors.green),
+              _StatusPill(
+                  label: 'Metadata watermark', color: AdvantaColors.green),
             ],
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildGotEvidenceFolders() {
+    if (_isLoadingGotObservation || _isLoadingGotEvidence) {
+      return _PanelCard(
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.4),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'Memuat folder evidence dari database...',
+                style: AdvantaText.body2.copyWith(
+                  color: _gotFetMutedColor(context),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (_gotEvidenceLoadError != null) {
+      return _PanelCard(
+        child: Row(
+          children: [
+            Icon(Icons.cloud_off_rounded, color: AdvantaColors.error),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Gagal memuat foto evidence: $_gotEvidenceLoadError',
+                style: AdvantaText.body2.copyWith(
+                  color: _gotFetTextColor(context),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final categoryCards = [
+      for (final category in _GotEvidenceCategory.values)
+        _buildGotEvidenceCategoryCard(category),
+    ];
+
+    return Column(
+      children: [
+        for (var i = 0; i < categoryCards.length; i++) ...[
+          categoryCards[i],
+          if (i != categoryCards.length - 1) const SizedBox(height: 12),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildGotEvidenceCategoryCard(_GotEvidenceCategory category) {
+    final slots = _gotEvidenceSlotsForCategory(category);
+    final filledCount = [
+      for (final slot in slots)
+        if (_gotEvidenceBySlot.containsKey(slot.key)) slot,
+    ].length;
+    final count = _gotEvidenceCountForCategory(category);
+    final color = _gotEvidenceCategoryColor(category);
+    final folderPath =
+        '${_selectedSample.lotId} / $_gotObservationStageLabel / ${category.title}';
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: color.withAlpha(_gotFetIsDark(context) ? 42 : 22),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Icon(category.icon, color: color),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      category.title,
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Jumlah ${category.title}: $count | $filledCount/${slots.length} foto',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _StatusPill(
+                label:
+                    slots.isEmpty ? 'Kosong' : '$filledCount/${slots.length}',
+                color: slots.isNotEmpty && filledCount == slots.length
+                    ? AdvantaColors.success
+                    : AdvantaColors.warning,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Folder: $folderPath',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: AdvantaText.caption.copyWith(
+              color: _gotFetMutedColor(context),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (slots.isEmpty)
+            _GotEvidenceEmptyFolder(
+              category: category,
+              count: count,
+            )
+          else
+            for (var i = 0; i < slots.length; i++) ...[
+              _GotEvidenceSlotTile(
+                slot: slots[i],
+                photo: _gotEvidenceBySlot[slots[i].key],
+                color: color,
+                syncing: _syncingGotEvidenceSlotKey == slots[i].key,
+                onCapture: () =>
+                    _pickGotEvidenceForSlot(slots[i], ImageSource.camera),
+                onGallery: () =>
+                    _pickGotEvidenceForSlot(slots[i], ImageSource.gallery),
+                onView: _gotEvidenceBySlot[slots[i].key] == null
+                    ? null
+                    : () => _openGotEvidenceViewer(
+                          slots[i],
+                          _gotEvidenceBySlot[slots[i].key]!,
+                        ),
+              ),
+              if (i != slots.length - 1) const SizedBox(height: 8),
+            ],
+        ],
+      ),
+    );
+  }
+
+  List<_GotEvidenceSlot> get _gotEvidenceSlots {
+    return [
+      for (final category in _GotEvidenceCategory.values)
+        ..._gotEvidenceSlotsForCategory(category),
+    ];
+  }
+
+  List<_GotEvidenceSlot> _gotEvidenceSlotsForCategory(
+    _GotEvidenceCategory category,
+  ) {
+    final slotCount = _gotEvidenceSlotCountForCategory(category);
+    return [
+      for (var i = 1; i <= slotCount; i++)
+        _GotEvidenceSlot(category: category, rcvNo: i),
+    ];
+  }
+
+  int _gotEvidenceSlotCountForCategory(_GotEvidenceCategory category) {
+    return switch (category) {
+      _GotEvidenceCategory.trueType => _gotTrueType > 0 ? 1 : 0,
+      _GotEvidenceCategory.offType => _gotOffType,
+      _GotEvidenceCategory.selfing => _gotSelfing,
+      _GotEvidenceCategory.male => _gotMale,
+    };
+  }
+
+  int _gotEvidenceCountForCategory(_GotEvidenceCategory category) {
+    return switch (category) {
+      _GotEvidenceCategory.trueType => _gotTrueType,
+      _GotEvidenceCategory.offType => _gotOffType,
+      _GotEvidenceCategory.selfing => _gotSelfing,
+      _GotEvidenceCategory.male => _gotMale,
+    };
+  }
+
+  Color _gotEvidenceCategoryColor(_GotEvidenceCategory category) {
+    return switch (category) {
+      _GotEvidenceCategory.trueType => AdvantaColors.success,
+      _GotEvidenceCategory.offType => AdvantaColors.error,
+      _GotEvidenceCategory.selfing => const Color(0xFF5B5BD6),
+      _GotEvidenceCategory.male => AdvantaColors.navy,
+    };
   }
 
   Widget _buildNoteBox({
@@ -1091,58 +4015,173 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildReplicationSelector() {
-    return SizedBox(
-      width: double.infinity,
-      child: SegmentedButton<int>(
-        segments: const [
-          ButtonSegment<int>(
-            value: 1,
-            label: Text('Ulangan 1'),
-          ),
-          ButtonSegment<int>(
-            value: 2,
-            label: Text('Ulangan 2'),
-          ),
-        ],
-        selected: {_selectedReplication},
-        onSelectionChanged: (selection) {
-          setState(() => _selectedReplication = selection.first);
-        },
-      ),
-    );
-  }
-
-  Widget _buildFetGridCard({bool showLabel = true}) {
     return _PanelCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (showLabel) ...[
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Visual Grid 5 x 10',
-                    style: AdvantaText.heading3.copyWith(
-                      color: _strongTextColor(context),
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: AdvantaColors.primaryGreen.withAlpha(
+                    _gotFetIsDark(context) ? 46 : 24,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.filter_2_rounded,
+                  color: AdvantaColors.primaryGreen,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Konteks Ulangan FET',
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _strongTextColor(context),
+                      ),
                     ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Foto, kroscek, input, dan review mengikuti pilihan aktif.',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: _mutedTextStyle(context).copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _StatusPill(
+                label: 'Aktif U$_selectedReplication',
+                color: AdvantaColors.primaryGreen,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<int>(
+              segments: const [
+                ButtonSegment<int>(
+                  value: 1,
+                  icon: Icon(Icons.looks_one_rounded),
+                  label: Text('Ulangan 1'),
+                ),
+                ButtonSegment<int>(
+                  value: 2,
+                  icon: Icon(Icons.looks_two_rounded),
+                  label: Text('Ulangan 2'),
+                ),
+              ],
+              selected: {_selectedReplication},
+              showSelectedIcon: false,
+              onSelectionChanged: (selection) {
+                final nextReplication = selection.first;
+                if (nextReplication == _selectedReplication) return;
+                setState(() => _selectedReplication = nextReplication);
+                _queueSelectedFetObservationSync();
+                _showSnack(
+                  'Aktif di Ulangan $nextReplication. Foto, kroscek, input, dan review ikut berpindah.',
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: [
+              for (final replication in const [1, 2])
+                _FetReplicationMiniStatus(
+                  replication: replication,
+                  selected: replication == _selectedReplication,
+                  photoReady: _fetPhotoReadyForReplication(replication),
+                  submitted: _fetSubmittedForReplication(replication),
+                  openItems: _fetOpenItemsForReplication(replication),
+                  emergence: _fetEmergenceForReplication(replication),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFetPhotoReviewCard() {
+    final plotPhoto = _currentFetPlotPhoto;
+    final hasPhoto = plotPhoto != null;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  hasPhoto
+                      ? 'Kroscek Foto Plot 10 x 10'
+                      : 'Visual Grid 10 x 10',
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
                   ),
                 ),
-                Text('50 titik', style: _mutedTextStyle(context)),
-              ],
-            ),
-            const SizedBox(height: 12),
-          ],
-          _FetPointGrid(
-            points: _currentReplication,
-            statusColor: _fetStatusColor,
-            statusLabel: _fetStatusShortLabel,
-            onTap: _cycleFetPoint,
+              ),
+              _StatusPill(
+                label: 'Ulangan $_selectedReplication',
+                color: AdvantaColors.primaryGreen,
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           Text(
-            'Tap titik untuk koreksi status sebelum hasil disimpan.',
+            hasPhoto
+                ? 'Tap titik di atas foto untuk ubah status. Long press untuk pilih status langsung.'
+                : 'Ambil foto plot dulu agar kroscek bisa dilakukan langsung dari gambar tanaman.',
             style: _mutedTextStyle(context),
+          ),
+          const SizedBox(height: 12),
+          if (hasPhoto)
+            _FetPhotoReviewBoard(
+              file: plotPhoto,
+              points: _currentReplication,
+              statusColor: _fetStatusColor,
+              statusLabel: _fetStatusShortLabel,
+              onTap: _cycleFetPoint,
+              onLongPress: _openFetPointStatusSheet,
+            )
+          else
+            _FetPointGrid(
+              points: _currentReplication,
+              statusColor: _fetStatusColor,
+              statusLabel: _fetStatusShortLabel,
+              onTap: _cycleFetPoint,
+            ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              _StatusPill(
+                label: '${_currentReplication.length} titik',
+                color: AdvantaColors.primaryGreen,
+              ),
+              _StatusPill(
+                label: 'Zoom 4x',
+                color: AdvantaColors.green,
+              ),
+              _StatusPill(
+                label: hasPhoto ? 'Foto aktif' : 'Mode grid',
+                color: hasPhoto ? AdvantaColors.success : AdvantaColors.warning,
+              ),
+            ],
           ),
         ],
       ),
@@ -1173,7 +4212,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 color: _strongTextColor(context),
               )),
           const SizedBox(height: 12),
-          _InfoRow(label: 'Total Titik Tanam', value: '50'),
+          _InfoRow(
+            label: 'Total Titik Tanam',
+            value: '${_currentReplication.length}',
+          ),
           const SizedBox(height: 9),
           _InfoRow(label: 'Tumbuh', value: _currentReplicationGrown.toString()),
           const SizedBox(height: 9),
@@ -1185,6 +4227,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
             label: 'Emergence (%)',
             value: _currentReplicationEmergence.toStringAsFixed(2),
             valueColor: AdvantaColors.success,
+          ),
+          const SizedBox(height: 9),
+          _InfoRow(
+            label: 'Status Hasil',
+            value: _fetResultLabel,
+            valueColor: _fetResultColor,
           ),
         ],
       ),
@@ -1199,20 +4247,22 @@ class _GotFetScreenState extends State<GotFetScreen> {
             flex: 2,
             child: AspectRatio(
               aspectRatio: 1.45,
-              child: _fetPlotPhoto == null
+              child: _currentFetPlotPhoto == null
                   ? const _PlotPreview()
-                  : _PlotPhotoPreview(file: _fetPlotPhoto!),
+                  : _PlotPhotoPreview(file: _currentFetPlotPhoto!),
             ),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: OutlinedButton.icon(
               icon: Icon(
-                _fetPlotPhoto == null
+                _currentFetPlotPhoto == null
                     ? Icons.add_rounded
                     : Icons.photo_library_rounded,
               ),
-              label: Text(_fetPlotPhoto == null ? 'Tambah Foto' : 'Ganti Foto'),
+              label: Text(
+                _currentFetPlotPhoto == null ? 'Tambah Foto' : 'Ganti Foto',
+              ),
               onPressed: () => _showEvidenceSourceSheet(
                 onCamera: () => _pickFetPlotPhoto(ImageSource.camera),
                 onGallery: () => _pickFetPlotPhoto(ImageSource.gallery),
@@ -1228,6 +4278,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return _PanelCard(
       child: Column(
         children: [
+          _InfoRow(label: 'Stage Observasi', value: _gotObservationStageLabel),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'No. Obs', value: _gotObservationNumber),
+          const SizedBox(height: 8),
           _InfoRow(label: 'Total Tanaman Diamati', value: '$_gotTotalObserved'),
           const SizedBox(height: 8),
           _InfoRow(label: 'Off-type', value: '$_gotOffType'),
@@ -1241,62 +4295,199 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _InfoRow(
             label: 'Purity (%)',
             value: _gotPurity.toStringAsFixed(2),
-            valueColor: AdvantaColors.success,
+            valueColor: _gotResultColor,
           ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Acuan PASS',
+            value: _gotPassFailReference,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Status Hasil',
+            value: _gotResultLabel,
+            valueColor: _gotResultColor,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Offtype (%)',
+              value: _gotOffTypePercent.toStringAsFixed(2)),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Selfing (%)',
+              value: _gotSelfingPercent.toStringAsFixed(2)),
+          const SizedBox(height: 8),
+          _InfoRow(
+              label: 'Male (%)', value: _gotMalePercent.toStringAsFixed(2)),
           const SizedBox(height: 12),
-          _buildPhotoEvidenceRow(),
+          _InfoRow(label: 'Foto Evidence', value: _gotEvidenceProgressText),
         ],
       ),
     );
   }
 
   Widget _buildFetReviewResult() {
+    final result = _latestFetObservation;
+    final totalPoints = result?.totalPoints ?? _currentReplication.length;
+    final grown = result?.grownCount ?? _currentReplicationGrown;
+    final notGrown = result?.notGrownCount ?? _currentReplicationNotGrown;
+    final review = result?.reviewCount ?? _currentReplicationReview;
+    final notReadable =
+        result?.notReadableCount ?? _currentReplicationNotReadable;
+    final emergence = result?.emergencePercent ?? _currentReplicationEmergence;
+    final resultLabel = review + notReadable == 0 ? 'PASS' : 'FAIL';
+    final resultColor =
+        resultLabel == 'PASS' ? AdvantaColors.success : AdvantaColors.error;
+
     return _PanelCard(
       child: Column(
         children: [
-          _InfoRow(label: 'Total Titik Tanam', value: '100'),
+          _InfoRow(label: 'Plot', value: result?.plotId ?? _fetPlotId),
           const SizedBox(height: 8),
-          _InfoRow(label: 'Tumbuh', value: '$_fetTotalGrown'),
+          _InfoRow(
+            label: 'Data Review',
+            value: result == null
+                ? 'Belum ada submit tersimpan'
+                : 'Submitted${result.submittedAt == null ? '' : ' | ${_dateTimeFormat.format(result.submittedAt!.toLocal())}'}',
+          ),
           const SizedBox(height: 8),
-          _InfoRow(label: 'Tidak Tumbuh', value: '$_fetTotalNotGrown'),
+          _InfoRow(label: 'Total Titik Tanam', value: '$totalPoints'),
           const SizedBox(height: 8),
-          _InfoRow(label: 'Review', value: '$_fetTotalReview'),
+          _InfoRow(label: 'Tumbuh', value: '$grown'),
           const SizedBox(height: 8),
-          _InfoRow(label: 'Tidak Terbaca', value: '$_fetTotalNotReadable'),
+          _InfoRow(label: 'Tidak Tumbuh', value: '$notGrown'),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Review', value: '$review'),
+          const SizedBox(height: 8),
+          _InfoRow(label: 'Tidak Terbaca', value: '$notReadable'),
           const SizedBox(height: 8),
           _InfoRow(
             label: 'Emergence (%)',
-            value: _fetEmergence.toStringAsFixed(2),
+            value: emergence.toStringAsFixed(2),
             valueColor: AdvantaColors.success,
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Status Hasil',
+            value: resultLabel,
+            valueColor: resultColor,
           ),
         ],
       ),
     );
   }
 
-  Widget _buildReviewTimeline() {
-    final events = [
-      ('Draft', DateTime(2026, 5, 20, 8, 0), true),
-      ('Submitted', DateTime(2026, 5, 20, 9, 15), true),
-      ('In Review', DateTime(2026, 5, 20, 10, 20), true),
-      ('Approved', DateTime(2026, 5, 20, 12, 0), false),
-      ('Final', DateTime(2026, 5, 20, 14, 0), false),
-    ];
+  Widget _buildFetReviewVisualCard() {
+    final result = _latestFetObservation;
+    final points = result?.pointStatuses.length == _fetGridPointCount
+        ? result!.pointStatuses
+        : _currentReplication;
+    final localPhoto = _currentFetPlotPhoto;
+    final photoUrl = result?.plotPhotoUrl;
+    final hasVisual = localPhoto != null || (photoUrl?.isNotEmpty ?? false);
 
     return _PanelCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Riwayat Status',
-              style: AdvantaText.heading3.copyWith(
-                color: _strongTextColor(context),
-              )),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Visual Review Plot',
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: hasVisual ? 'Foto tersedia' : 'Tanpa foto',
+                color:
+                    hasVisual ? AdvantaColors.success : AdvantaColors.warning,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            hasVisual
+                ? 'Overlay grid ini mengikuti status titik yang tersimpan untuk ulangan aktif.'
+                : 'Hasil titik tetap bisa direview, tetapi foto plot belum tersedia di data submit.',
+            style: _mutedTextStyle(context),
+          ),
+          const SizedBox(height: 12),
+          if (hasVisual)
+            _FetReviewPhotoBoard(
+              file: localPhoto,
+              photoUrl: photoUrl,
+              points: points,
+              statusColor: _fetStatusColor,
+              statusLabel: _fetStatusShortLabel,
+            )
+          else
+            _FetPointGrid(
+              points: points,
+              statusColor: _fetStatusColor,
+              statusLabel: _fetStatusShortLabel,
+              onTap: (_) {},
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildReviewTimeline() {
+    final events = _reviewTimelineEvents.isEmpty
+        ? [
+            for (final step in _selectedSample.steps)
+              _ReviewTimelineEvent(
+                label: step.label,
+                date: step.date,
+                done: step.done,
+              ),
+          ]
+        : _reviewTimelineEvents;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text('Riwayat Status',
+                    style: AdvantaText.heading3.copyWith(
+                      color: _strongTextColor(context),
+                    )),
+              ),
+              _StatusPill(
+                label: _reviewTimelineEvents.isEmpty ? 'Fallback' : 'Realtime',
+                color: _reviewTimelineEvents.isEmpty
+                    ? AdvantaColors.warning
+                    : AdvantaColors.success,
+              ),
+            ],
+          ),
+          if (_reviewTimelineLoadError != null) ...[
+            const SizedBox(height: 8),
+            _InlineStatusMessage(
+              icon: Icons.cloud_off_rounded,
+              color: AdvantaColors.warning,
+              text:
+                  'Belum bisa memuat riwayat database: $_reviewTimelineLoadError',
+            ),
+          ],
           const SizedBox(height: 12),
           for (var i = 0; i < events.length; i++)
             _TimelineRow(
-              step: _TrackingStep(events[i].$1, events[i].$2, events[i].$3),
+              step: _TrackingStep(
+                events[i].label,
+                events[i].date,
+                events[i].done,
+              ),
               isLast: i == events.length - 1,
               dateTimeFormat: _dateTimeFormat,
+              actor: events[i].actor,
+              remarks: events[i].remarks,
             ),
         ],
       ),
@@ -1326,10 +4517,51 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _gotSuspicious = _boundedCount(_gotSuspicious + delta);
           break;
       }
+      _syncGotCountControllers();
     });
   }
 
   int _boundedCount(int value) => value.clamp(0, _gotTotalObserved).toInt();
+
+  void _setGotCountFromText(String field, String rawValue) {
+    final value = int.tryParse(rawValue.trim()) ?? 0;
+    setState(() {
+      switch (field) {
+        case 'total':
+          _gotTotalObserved = math.max(0, value);
+          break;
+        case 'offType':
+          _gotOffType = math.max(0, value);
+          break;
+        case 'selfing':
+          _gotSelfing = math.max(0, value);
+          break;
+        case 'male':
+          _gotMale = math.max(0, value);
+          break;
+        case 'suspicious':
+          _gotSuspicious = math.max(0, value);
+          break;
+      }
+    });
+  }
+
+  void _syncGotCountControllers() {
+    _setCounterText(_gotTotalObservedController, _gotTotalObserved);
+    _setCounterText(_gotOffTypeController, _gotOffType);
+    _setCounterText(_gotSelfingController, _gotSelfing);
+    _setCounterText(_gotMaleController, _gotMale);
+    _setCounterText(_gotSuspiciousController, _gotSuspicious);
+  }
+
+  void _setCounterText(TextEditingController controller, int value) {
+    final text = value.toString();
+    if (controller.text == text) return;
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
+  }
 
   void _cycleFetPoint(int index) {
     final current = _currentReplication[index];
@@ -1343,40 +4575,360 @@ class _GotFetScreenState extends State<GotFetScreen> {
     setState(() => _currentReplication[index] = next);
   }
 
-  Future<void> _pickGotEvidence(ImageSource source) async {
+  void _setFetPointStatus(int index, _FetPointStatus status) {
+    setState(() => _currentReplication[index] = status);
+  }
+
+  void _openFetPointStatusSheet(int index) {
+    HapticFeedback.selectionClick();
+    final pointNo = index + 1;
+
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      backgroundColor: _gotFetCardColor(context),
+      builder: (sheetContext) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Titik Tanam $pointNo',
+                      style: AdvantaText.heading3.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                  ),
+                  _StatusPill(
+                    label: _fetStatusLabel(_currentReplication[index]),
+                    color: _fetStatusColor(_currentReplication[index]),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              for (final status in _FetPointStatus.values)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(
+                    backgroundColor: _fetStatusColor(status).withAlpha(
+                      _gotFetIsDark(context) ? 70 : 32,
+                    ),
+                    child: Text(
+                      _fetStatusShortLabel(status),
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetIsDark(context)
+                            ? Colors.white
+                            : _fetStatusColor(status),
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  title: Text(_fetStatusLabel(status)),
+                  trailing: _currentReplication[index] == status
+                      ? Icon(
+                          Icons.check_circle_rounded,
+                          color: _fetStatusColor(status),
+                        )
+                      : null,
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _setFetPointStatus(index, status);
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _pickGotEvidenceForSlot(
+    _GotEvidenceSlot slot,
+    ImageSource source,
+  ) async {
+    if (_syncingGotEvidenceSlotKey != null) return;
+
     try {
-      final image = await _imagePicker.pickImage(
-        source: source,
-        imageQuality: 86,
-        maxWidth: 1800,
-      );
+      final image = source == ImageSource.camera
+          ? await _captureWithStandaloneCamera(
+              module: _InspectionModule.got,
+              title: '${slot.category.title} - ${slot.label}',
+              subtitle: _gotObservationStageLabel,
+            )
+          : await _imagePicker.pickImage(
+              source: source,
+              imageQuality: 86,
+              maxWidth: 1800,
+            );
       if (image == null || !mounted) return;
-      setState(() => _gotEvidencePhotos.add(File(image.path)));
-      _showSnack('Foto evidence GOT ditambahkan.');
-    } catch (e) {
+
+      final prepared = await _photoPipeline.preparePhoto(
+        image: image,
+        context: _SmartPhotoContext(
+          module: 'got',
+          lotId: _selectedSample.lotId,
+          sampleId: _selectedSample.sampleId,
+          plotId: _gotPlotId,
+          stage: _gotObservationStagePayload,
+          label: '${slot.category.title} ${slot.label}',
+          source: source == ImageSource.camera ? 'camera' : 'gallery',
+          actor: _actorName,
+        ),
+      );
       if (!mounted) return;
-      _showSnack('Gagal mengambil foto GOT: ${_friendlyError(e)}');
+      setState(() => _syncingGotEvidenceSlotKey = slot.key);
+      try {
+        await _gotFetService.saveGotEvidencePhoto(
+          file: prepared.file,
+          lotId: _selectedSample.lotId,
+          sampleId: _selectedSample.sampleId,
+          plotId: _gotPlotId,
+          stage: _gotObservationStagePayload,
+          category: slot.category.key,
+          rcvNo: slot.rcvNo,
+          rcvLabel: slot.label,
+          uploadedBy: _actorName,
+        );
+      } catch (_) {
+        await _photoPipeline.enqueueGotEvidence(
+          prepared: prepared,
+          slot: slot,
+          lotId: _selectedSample.lotId,
+          sampleId: _selectedSample.sampleId,
+          plotId: _gotPlotId,
+          stage: _gotObservationStagePayload,
+          uploadedBy: _actorName,
+        );
+        await _refreshSmartPhotoStatus();
+        if (!mounted) return;
+        HapticFeedback.selectionClick();
+        _showSnack(
+          '${slot.label} disimpan offline. Sync otomatis saat dicoba ulang.',
+        );
+        return;
+      }
+      if (!mounted) return;
+      HapticFeedback.selectionClick();
+      await _refreshSmartPhotoStatus();
+      final reviewText = prepared.metadata.needsReview
+          ? ' Quality: ${prepared.metadata.warnings.join(', ')}.'
+          : '';
+      final duplicateText =
+          prepared.duplicateLikely ? ' Potensi duplikat terdeteksi.' : '';
+      _showSnack(
+        '${slot.label} ${slot.category.title} tersimpan.$reviewText$duplicateText',
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showSnack('Gagal simpan foto ${slot.label}: ${_friendlyError(error)}');
+    } finally {
+      if (mounted && _syncingGotEvidenceSlotKey == slot.key) {
+        setState(() => _syncingGotEvidenceSlotKey = null);
+      }
     }
   }
 
-  Future<void> _pickFetPlotPhoto(ImageSource source) async {
+  void _openGotEvidenceViewer(
+    _GotEvidenceSlot slot,
+    _GotEvidencePhoto photo,
+  ) {
+    showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog.fullscreen(
+          backgroundColor:
+              _gotFetIsDark(context) ? AdvantaColors.navyDark : Colors.black,
+          child: SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${slot.category.title} - ${slot.label}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AdvantaText.heading3.copyWith(
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Tutup',
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: InteractiveViewer(
+                    minScale: 0.7,
+                    maxScale: 4,
+                    child: Center(
+                      child: Image.network(
+                        photo.photoUrl,
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, __, ___) => Text(
+                          'Foto tidak bisa dimuat',
+                          style: AdvantaText.bodyBold.copyWith(
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+                  child: Text(
+                    [
+                      _selectedSample.lotId,
+                      _gotObservationStageLabel,
+                      photo.rcvLabel,
+                      if (photo.uploadedAt != null)
+                        _dateTimeFormat.format(photo.uploadedAt!.toLocal()),
+                    ].join(' | '),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: AdvantaText.caption.copyWith(
+                      color: Colors.white.withAlpha(215),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _pickFetPlotPhoto(
+    ImageSource source, {
+    bool openAnalysisAfterPick = false,
+  }) async {
     try {
-      final image = await _imagePicker.pickImage(
-        source: source,
-        imageQuality: 88,
-        maxWidth: 2200,
-      );
+      final image = source == ImageSource.camera
+          ? await _captureWithStandaloneCamera(
+              module: _InspectionModule.fet,
+              title: 'Plot FET Ulangan $_selectedReplication',
+              subtitle: 'Sejajarkan seluruh plot 10 x 10',
+            )
+          : await _imagePicker.pickImage(
+              source: source,
+              imageQuality: 88,
+              maxWidth: 2200,
+            );
       if (image == null || !mounted) return;
-      setState(() => _fetPlotPhoto = File(image.path));
-      _showSnack('Foto plot FET siap dianalisis.');
+      final prepared = await _photoPipeline.preparePhoto(
+        image: image,
+        context: _SmartPhotoContext(
+          module: 'fet',
+          lotId: _selectedSample.lotId,
+          sampleId: _selectedSample.sampleId,
+          plotId: _fetPlotId,
+          stage: 'Replication $_selectedReplication',
+          label: 'Plot U$_selectedReplication',
+          source: source == ImageSource.camera ? 'camera' : 'gallery',
+          actor: _actorName,
+        ),
+      );
+      if (!mounted) return;
+      setState(() {
+        _fetPlotPhotosByReplication[_selectedReplication] = prepared.file;
+        _fetPlotMetadataByReplication[_selectedReplication] = prepared.metadata;
+      });
+      final reviewText = prepared.metadata.needsReview
+          ? ' Cek lagi: ${prepared.metadata.warnings.join(', ')}.'
+          : '';
+      final duplicateText =
+          prepared.duplicateLikely ? ' Potensi duplikat.' : '';
+      _showSnack('Foto plot FET siap dianalisis.$reviewText$duplicateText');
+      if (openAnalysisAfterPick) {
+        _openPage(_GotFetPage.fetAnalysis);
+      }
     } catch (e) {
       if (!mounted) return;
       _showSnack('Gagal mengambil foto FET: ${_friendlyError(e)}');
     }
   }
 
-  void _removeGotEvidence(File file) {
-    setState(() => _gotEvidencePhotos.remove(file));
+  Future<XFile?> _captureWithStandaloneCamera({
+    required _InspectionModule module,
+    required String title,
+    required String subtitle,
+  }) async {
+    final image = await Navigator.of(context).push<XFile>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (context) {
+          return _StandaloneCameraScreen(
+            module: module,
+            title: title,
+            subtitle: subtitle,
+          );
+        },
+      ),
+    );
+    if (!mounted) return null;
+    return image;
+  }
+
+  Future<void> _pickPlantingDate() async {
+    final sample = _selectedSample;
+    final today = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: sample.plantingDate ?? today,
+      firstDate: DateTime(today.year - 5),
+      lastDate: DateTime(today.year + 5),
+    );
+    if (picked == null || !mounted) return;
+
+    final resultEstimation = picked.add(const Duration(days: 65));
+    setState(() {
+      sample.plantingDate = picked;
+      sample.weekOfPlanting = _excelWeekOfYear(picked);
+      sample.resultEstimation = resultEstimation;
+      sample.weekOfResultEstimation = _excelWeekOfYear(resultEstimation);
+      if (!_gotNoteTanamOptions.contains(sample.noteTanam)) {
+        sample.noteTanam = 'On Process';
+      }
+    });
+    await _persistSelectedSamplePlanning();
+  }
+
+  Future<void> _persistSelectedSamplePlanning() async {
+    final sample = _selectedSample;
+    try {
+      await _gotFetService.updateSamplePlanning(
+        batch: sample.batch,
+        plantingDate: sample.plantingDate,
+        weekOfPlanting: sample.weekOfPlanting,
+        resultEstimation: sample.resultEstimation,
+        weekOfResultEstimation: sample.weekOfResultEstimation,
+        noteTanam: sample.noteTanam,
+        location: sample.location,
+        fieldArea: sample.fieldArea,
+        statusSample: sample.statusSample,
+      );
+    } catch (error) {
+      if (!mounted) return;
+      _showSnack('Gagal update data Batch: ${_friendlyError(error)}');
+    }
   }
 
   Future<void> _submitGotResult() async {
@@ -1392,8 +4944,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           lotId: _selectedSample.lotId,
           sampleId: _selectedSample.sampleId,
           hybrid: _selectedSample.hybrid,
-          plotId: 'G1 - U1',
-          stage: 'Flowering',
+          plotId: _gotPlotId,
+          stage: _gotObservationStagePayload,
           totalObserved: _gotTotalObserved,
           offTypeCount: _gotOffType,
           selfingCount: _gotSelfing,
@@ -1402,11 +4954,21 @@ class _GotFetScreenState extends State<GotFetScreen> {
           trueTypeCount: _gotTrueType,
           purityPercent: _gotPurity,
           submittedBy: _actorName,
-          evidencePhotos: List<File>.from(_gotEvidencePhotos),
-          remarks: _optionalText(_gotNoteController),
+          evidencePhotos: const [],
+          remarks: _remarksWithManualContext(
+            _gotNoteController,
+            includeGotStage: true,
+          ),
+        );
+        await _gotFetService.updateSampleStatus(
+          batch: _selectedSample.batch,
+          status: 'Submitted',
         );
         if (!mounted) return;
-        setState(() => _selectedSample.status = 'Submitted');
+        setState(() {
+          _selectedSample.status = 'Submitted';
+          _selectedSample.statusSample = 'Submitted';
+        });
       },
     );
   }
@@ -1424,7 +4986,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           lotId: _selectedSample.lotId,
           sampleId: _selectedSample.sampleId,
           hybrid: _selectedSample.hybrid,
-          plotId: 'F1 - U1',
+          plotId: _fetPlotId,
           replication: _selectedReplication,
           dap: 7,
           totalPoints: _currentReplication.length,
@@ -1437,21 +4999,37 @@ class _GotFetScreenState extends State<GotFetScreen> {
             for (final point in _currentReplication) _fetStatusPayload(point),
           ],
           submittedBy: _actorName,
-          plotPhoto: _fetPlotPhoto,
-          remarks: _optionalText(_fetNoteController),
+          plotPhoto: _currentFetPlotPhoto,
+          remarks: _remarksWithManualContext(_fetNoteController),
+        );
+        await _gotFetService.updateSampleStatus(
+          batch: _selectedSample.batch,
+          status: 'Submitted',
         );
         if (!mounted) return;
-        setState(() => _selectedSample.status = 'Submitted');
+        setState(() {
+          _selectedSample.status = 'Submitted';
+          _selectedSample.statusSample = 'Submitted';
+        });
       },
     );
   }
 
-  Future<void> _submitReviewDecision(String status) async {
+  Future<void> _submitReviewDecision(
+    String status, {
+    String? displayStatus,
+    VoidCallback? onSubmitted,
+  }) async {
     final previousStatus = _selectedSample.status;
-    final module = _reviewSegment == 0 ? 'GOT' : 'FET';
+    final module = switch (_page) {
+      _GotFetPage.gotReview => 'GOT',
+      _GotFetPage.fetReview => 'FET',
+      _ => _reviewSegment == 0 ? 'GOT' : 'FET',
+    };
 
     await _runBackendAction(
-      successMessage: 'Decision ${_selectedSample.lotId}: $status',
+      successMessage:
+          'Decision ${_selectedSample.lotId}: ${displayStatus ?? status}',
       action: () async {
         await _gotFetService.submitReviewDecision(
           lotId: _selectedSample.lotId,
@@ -1460,10 +5038,43 @@ class _GotFetScreenState extends State<GotFetScreen> {
           previousStatus: previousStatus,
           newStatus: status,
           reviewer: _actorName,
-          remarks: 'Decision from GOT & FET review screen',
+          remarks: 'Decision from $module review screen',
+        );
+        await _gotFetService.updateSampleStatus(
+          batch: _selectedSample.batch,
+          status: status,
         );
         if (!mounted) return;
-        setState(() => _selectedSample.status = status);
+        setState(() {
+          _selectedSample.status = status;
+          _selectedSample.statusSample = status;
+        });
+        onSubmitted?.call();
+      },
+    );
+  }
+
+  Future<void> _confirmTrackingStatus(
+    String status, {
+    VoidCallback? onConfirmed,
+  }) async {
+    final sample = _selectedSample;
+
+    await _runBackendAction(
+      successMessage: 'Tracking ${sample.batch}: $status',
+      action: () async {
+        await _gotFetService.appendTrackingEvent(
+          lotId: sample.lotId,
+          status: status,
+          actor: _actorName,
+          remarks: 'Lot tracking confirmation for ${sample.batch}',
+        );
+        if (!mounted) return;
+        setState(() {
+          sample.status = status;
+          sample.statusSample = status;
+        });
+        onConfirmed?.call();
       },
     );
   }
@@ -1545,6 +5156,67 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return text.isEmpty ? null : text;
   }
 
+  String? _remarksWithManualContext(
+    TextEditingController controller, {
+    bool includeGotStage = false,
+  }) {
+    final base = _optionalText(controller);
+    final contextParts = [
+      'Batch: ${_selectedSample.batch}',
+      'Process Stage: ${_selectedSample.processStage}',
+      if (includeGotStage) 'GOT Stage: $_gotObservationStageLabel',
+      if (includeGotStage) 'No. Obs: $_gotObservationNumber',
+    ];
+    final contextText = contextParts.join(' | ');
+    if (base == null) return contextText;
+    return '$base\n$contextText';
+  }
+
+  String _formatDate(DateTime? date) {
+    if (date == null) return '-';
+    return _dateFormat.format(date);
+  }
+
+  String _formatNumber(num value) {
+    final formatter = NumberFormat.decimalPattern('id_ID');
+    return formatter.format(value);
+  }
+
+  String _formatArea(double? value) {
+    if (value == null) return '-';
+    return '${value.toStringAsFixed(3)} ha';
+  }
+
+  String _formatPercent(double value) {
+    return value == value.roundToDouble()
+        ? value.toStringAsFixed(0)
+        : value.toStringAsFixed(2);
+  }
+
+  String _normalizeRuleText(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  bool _containsRuleTerm(String source, List<String> terms) {
+    final paddedSource = ' ${_normalizeRuleText(source)} ';
+    for (final term in terms) {
+      final normalizedTerm = _normalizeRuleText(term);
+      if (normalizedTerm.isEmpty) continue;
+      if (paddedSource.contains(' $normalizedTerm ')) return true;
+    }
+    return false;
+  }
+
+  int _excelWeekOfYear(DateTime date) {
+    final day = DateTime(date.year, date.month, date.day);
+    final firstDay = DateTime(date.year);
+    return (day.difference(firstDay).inDays ~/ 7) + 1;
+  }
+
   String _friendlyError(Object error) {
     final message = error.toString().replaceFirst('Exception: ', '').trim();
     if (message.length <= 140) return message;
@@ -1555,12 +5227,53 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return points.where((point) => point == status).length;
   }
 
+  List<_FetPointStatus> _readFetPointStatuses(Map<String, dynamic> row) {
+    final raw = _readValue(row, const ['point_statuses']);
+    if (raw is! List) return const [];
+
+    final statuses = <_FetPointStatus>[];
+    for (final item in raw) {
+      if (item is Map) {
+        statuses.add(
+          _fetStatusFromPayload(
+            item['status']?.toString() ?? item['value']?.toString() ?? '',
+          ),
+        );
+      } else {
+        statuses.add(_fetStatusFromPayload(item.toString()));
+      }
+    }
+    return statuses;
+  }
+
+  double _gotPercent(int count) {
+    if (_gotTotalObserved == 0) return 0;
+    return (count / _gotTotalObserved) * 100;
+  }
+
   String _fetStatusPayload(_FetPointStatus status) {
     return switch (status) {
       _FetPointStatus.grown => 'grown',
       _FetPointStatus.notGrown => 'not_grown',
       _FetPointStatus.review => 'review',
       _FetPointStatus.notReadable => 'not_readable',
+    };
+  }
+
+  _FetPointStatus _fetStatusFromPayload(String value) {
+    return switch (value.toLowerCase().trim()) {
+      'grown' || 'g' || 'tumbuh' => _FetPointStatus.grown,
+      'not_grown' ||
+      'not grown' ||
+      'ng' ||
+      'tidak tumbuh' =>
+        _FetPointStatus.notGrown,
+      'not_readable' ||
+      'not readable' ||
+      'nr' ||
+      'tidak terbaca' =>
+        _FetPointStatus.notReadable,
+      _ => _FetPointStatus.review,
     };
   }
 
@@ -1577,7 +5290,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return switch (status) {
       _FetPointStatus.grown => 'Tumbuh',
       _FetPointStatus.notGrown => 'Tidak Tumbuh',
-      _FetPointStatus.review => 'Titik Terbaca',
+      _FetPointStatus.review => 'Perlu Review',
       _FetPointStatus.notReadable => 'Tidak Terbaca',
     };
   }
@@ -1617,84 +5330,210 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return _gotFetTextColor(context);
   }
 
-  List<_GotFetSample> _seedSamples() {
+  _GotFetSample _sampleFromRow(Map<String, dynamic> row) {
+    final batch = _readText(row, const ['batch', 'Batch']);
+    final testType = _readText(
+      row,
+      const ['test_type', 'testType', 'Test Type', 'module'],
+      fallback: _inferTestType(row),
+    );
+
+    return _GotFetSample(
+      lotId:
+          _readText(row, const ['lot_id', 'lotId', 'Batch'], fallback: batch),
+      sampleId: _readText(
+        row,
+        const ['sample_id', 'sampleId', 'No', 'no'],
+        fallback: batch,
+      ),
+      hybrid: _readText(row, const ['hybrid_all', 'hybrid', 'Hybrid All']),
+      crop: _readText(row, const ['category', 'Category']),
+      season: _readText(row, const ['crop_year', 'Crop Year']),
+      testType: testType,
+      status: _readText(
+        row,
+        const [
+          'status',
+          'Status Sample',
+          'status_sample',
+          'Status GOT 2',
+          'status_got_2',
+        ],
+        fallback: 'Open',
+      ),
+      pic: _readText(row, const ['pic', 'PIC'], fallback: '-'),
+      dueDate:
+          _readDate(row, const ['result_estimation', 'Result Estimation']) ??
+              DateTime.now(),
+      gender: _readText(row, const ['gender', 'Gender']),
+      typeSeed: _readText(row, const ['type_seed', 'Type Seed']),
+      category: _readText(row, const ['category', 'Category']),
+      cropYear: _readInt(row, const ['crop_year', 'Crop Year']),
+      processStage: _readText(row, const ['process_stage', 'Process Stage']),
+      batch: batch,
+      noteSample: _readText(row, const ['note_sample', 'Note Sample']),
+      qtyByDss: _readInt(row, const ['qty_by_dss', 'Qty by DSS']),
+      commercialQtyInventory: _readNum(
+        row,
+        const ['commercial_qty_inventory', 'Commercial Qty Inventory'],
+      ),
+      flagging: _readText(row, const ['flagging', 'Flagging']),
+      reasonTesting: _readText(
+        row,
+        const [
+          'reason_testing',
+          'note_sample_reason_testing',
+          'Note Sample/ Reason testing'
+        ],
+      ),
+      deliveryDate1:
+          _readDate(row, const ['delivery_date_1', 'Delivery Date 1']),
+      deliveryDate2:
+          _readDate(row, const ['delivery_date_2', 'Delivery Date 2']),
+      plantingDate: _readDate(row, const ['planting_date', 'Planting Date']),
+      weekOfPlanting: _readOptionalInt(
+        row,
+        const ['week_of_planting', 'Week Of Planting'],
+      ),
+      resultEstimation:
+          _readDate(row, const ['result_estimation', 'Result Estimation']),
+      weekOfResultEstimation: _readOptionalInt(
+        row,
+        const ['week_of_result_estimation', 'Week of Result Est.'],
+      ),
+      noteTanam: _readText(row, const ['note_tanam', 'Note Tanam']),
+      location: _readText(row, const ['location', 'Location']),
+      fieldArea: _readDouble(row, const ['field_area', 'Field Area']),
+      statusGot2: _readText(row, const ['status_got_2', 'Status GOT 2']),
+      statusSample: _readText(
+        row,
+        const ['status_sample', 'Status Sample'],
+        fallback: 'Fresh',
+      ),
+      vegetativeObservationNo:
+          _readNullableText(row, const ['vegetative_no_obs', 'No. Obs']),
+      finalObservationNo:
+          _readNullableText(row, const ['final_no_obs', 'Final No. Obs']),
+      payment: _readText(row, const ['payment', 'Payment']),
+      steps: _trackingStepsFromRow(row),
+    );
+  }
+
+  String _inferTestType(Map<String, dynamic> row) {
+    final processStage =
+        _readText(row, const ['process_stage', 'Process Stage']).toUpperCase();
+    final hasGotValue = _readNullableText(row, const [
+          'status_got_2',
+          'Status GOT 2',
+          'status_got_veg',
+          'Status GOT Veg',
+          'final_status_got',
+          'Final Status GOT',
+        ]) !=
+        null;
+    if (hasGotValue || processStage == 'DSS' || processStage == 'DCS') {
+      return 'GOT';
+    }
+    return 'FET';
+  }
+
+  List<_TrackingStep> _trackingStepsFromRow(Map<String, dynamic> row) {
+    final deliveryDate =
+        _readDate(row, const ['delivery_date_1', 'Delivery Date 1']);
+    final plantingDate =
+        _readDate(row, const ['planting_date', 'Planting Date']);
+    final resultDate =
+        _readDate(row, const ['result_estimation', 'Result Estimation']);
+    final now = DateTime.now();
+
     return [
-      _GotFetSample(
-        lotId: 'KC25-05-0001',
-        sampleId: 'GOTFET-001',
-        hybrid: 'KC 888',
-        crop: 'Field Corn',
-        season: 'DS 2026',
-        testType: 'GOT + FET',
-        status: 'In Review',
-        pic: 'QA Field Inspector',
-        dueDate: DateTime(2026, 5, 24),
-        steps: [
-          _TrackingStep('Sample Created', DateTime(2026, 5, 18, 9, 0), true),
-          _TrackingStep('Prepared', DateTime(2026, 5, 18, 14, 30), true),
-          _TrackingStep('Dispatched', DateTime(2026, 5, 19, 8, 45), true),
-          _TrackingStep('In Transit', DateTime(2026, 5, 19, 9, 10), true),
-          _TrackingStep('Received', DateTime(2026, 5, 19, 15, 40), false),
-          _TrackingStep('Planted', DateTime(2026, 5, 20, 7, 0), false),
-          _TrackingStep('Observed', DateTime(2026, 5, 21, 8, 30), false),
-          _TrackingStep('Reviewed', DateTime(2026, 5, 22, 10, 0), false),
-          _TrackingStep('Completed', DateTime(2026, 5, 22, 14, 0), false),
-        ],
-      ),
-      _GotFetSample(
-        lotId: 'KC25-05-0002',
-        sampleId: 'FET-045',
-        hybrid: 'KC 889',
-        crop: 'Sweet Corn',
-        season: 'DS 2026',
-        testType: 'FET',
-        status: 'Observation Due',
-        pic: 'Observer B',
-        dueDate: DateTime(2026, 5, 20),
-        steps: [
-          _TrackingStep('Sample Created', DateTime(2026, 5, 9, 9, 0), true),
-          _TrackingStep('Prepared', DateTime(2026, 5, 10, 9, 0), true),
-          _TrackingStep('Dispatched', DateTime(2026, 5, 10, 13, 0), true),
-          _TrackingStep('Received', DateTime(2026, 5, 11, 8, 20), true),
-          _TrackingStep('Planted', DateTime(2026, 5, 12, 7, 0), true),
-          _TrackingStep('Observed', DateTime(2026, 5, 20, 8, 0), false),
-          _TrackingStep('Reviewed', DateTime(2026, 5, 21, 10, 0), false),
-          _TrackingStep('Completed', DateTime(2026, 5, 22, 11, 0), false),
-        ],
-      ),
-      _GotFetSample(
-        lotId: 'KC25-05-0003',
-        sampleId: 'GOT-140',
-        hybrid: 'KC 777',
-        crop: 'Field Corn',
-        season: 'DS 2026',
-        testType: 'GOT',
-        status: 'In Transit',
-        pic: 'GOT Site A',
-        dueDate: DateTime(2026, 5, 28),
-        steps: [
-          _TrackingStep('Sample Created', DateTime(2026, 5, 18, 11, 0), true),
-          _TrackingStep('Prepared', DateTime(2026, 5, 19, 9, 0), true),
-          _TrackingStep('Dispatched', DateTime(2026, 5, 20, 8, 15), true),
-          _TrackingStep('In Transit', DateTime(2026, 5, 20, 10, 0), true),
-          _TrackingStep('Received', DateTime(2026, 5, 21, 8, 0), false),
-          _TrackingStep('Planted', DateTime(2026, 5, 23, 7, 0), false),
-          _TrackingStep('Observed', DateTime(2026, 5, 28, 8, 0), false),
-          _TrackingStep('Completed', DateTime(2026, 5, 30, 15, 0), false),
-        ],
-      ),
+      _TrackingStep(
+          'Sample Created', deliveryDate ?? now, deliveryDate != null),
+      _TrackingStep('Dispatched', deliveryDate ?? now, deliveryDate != null),
+      _TrackingStep('Planted', plantingDate ?? now, plantingDate != null),
+      _TrackingStep('Observed', resultDate ?? now, resultDate != null),
+      _TrackingStep('Reviewed', resultDate ?? now, false),
+      _TrackingStep('Completed', resultDate ?? now, false),
     ];
   }
 
-  List<_FetPointStatus> _seedFetPoints({
-    required List<int> notGrownIndexes,
-    required List<int> reviewIndexes,
+  dynamic _readValue(Map<String, dynamic> row, List<String> keys) {
+    for (final key in keys) {
+      if (row.containsKey(key)) return row[key];
+      final normalizedKey = _normalizeColumnKey(key);
+      for (final entry in row.entries) {
+        if (_normalizeColumnKey(entry.key) == normalizedKey) return entry.value;
+      }
+    }
+    return null;
+  }
+
+  String _readText(
+    Map<String, dynamic> row,
+    List<String> keys, {
+    String fallback = '-',
   }) {
-    return List<_FetPointStatus>.generate(50, (index) {
-      if (notGrownIndexes.contains(index)) return _FetPointStatus.notGrown;
-      if (reviewIndexes.contains(index)) return _FetPointStatus.review;
-      return _FetPointStatus.grown;
-    });
+    final value = _readValue(row, keys);
+    if (value == null) return fallback;
+    final text = value.toString().trim();
+    return text.isEmpty ? fallback : text;
+  }
+
+  String? _readNullableText(Map<String, dynamic> row, List<String> keys) {
+    final value = _readValue(row, keys);
+    if (value == null) return null;
+    final text = value.toString().trim();
+    return text.isEmpty ? null : text;
+  }
+
+  int _readInt(Map<String, dynamic> row, List<String> keys) {
+    return _readOptionalInt(row, keys) ?? 0;
+  }
+
+  int? _readOptionalInt(Map<String, dynamic> row, List<String> keys) {
+    final value = _readValue(row, keys);
+    if (value is int) return value;
+    if (value is num) return value.round();
+    return int.tryParse(value?.toString() ?? '');
+  }
+
+  num? _readNum(Map<String, dynamic> row, List<String> keys) {
+    final value = _readValue(row, keys);
+    if (value is num) return value;
+    return num.tryParse(value?.toString() ?? '');
+  }
+
+  double? _readDouble(Map<String, dynamic> row, List<String> keys) {
+    final value = _readNum(row, keys);
+    return value?.toDouble();
+  }
+
+  DateTime? _readDate(Map<String, dynamic> row, List<String> keys) {
+    final value = _readValue(row, keys);
+    if (value == null) return null;
+    if (value is DateTime) return value;
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    if (value is num) {
+      final excelEpoch = DateTime(1899, 12, 30);
+      return excelEpoch.add(Duration(days: value.floor()));
+    }
+    return DateTime.tryParse(value.toString());
+  }
+
+  String _normalizeColumnKey(String key) {
+    return key
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
+  }
+
+  List<_FetPointStatus> _initialFetPoints() {
+    return List<_FetPointStatus>.filled(
+      _fetGridPointCount,
+      _FetPointStatus.review,
+    );
   }
 }
 
@@ -1709,6 +5548,67 @@ class _PageScaffold extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
         children: [child],
+      ),
+    );
+  }
+}
+
+class _SampleStatePage extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String message;
+
+  const _SampleStatePage({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: AdvantaColors.green.withAlpha(
+                    _gotFetIsDark(context) ? 52 : 24,
+                  ),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  icon,
+                  color: _gotFetIsDark(context)
+                      ? Colors.white
+                      : AdvantaColors.greenDark,
+                  size: 30,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: AdvantaText.heading2.copyWith(
+                  color: _gotFetTextColor(context),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: AdvantaText.body2.copyWith(
+                  color: _gotFetMutedColor(context),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1729,7 +5629,7 @@ class _LoadingOverlay extends StatelessWidget {
 
 class _BrandHeader extends StatelessWidget {
   final String? userName;
-  final _GotFetSample selectedSample;
+  final _GotFetSample? selectedSample;
 
   const _BrandHeader({
     required this.userName,
@@ -1856,7 +5756,9 @@ class _BrandHeader extends StatelessWidget {
               ),
               const SizedBox(height: 6),
               Text(
-                'Active lot: ${selectedSample.lotId} | ${selectedSample.status}',
+                selectedSample == null
+                    ? 'Active lot: menunggu data Batch dari Supabase'
+                    : 'Active lot: ${selectedSample!.lotId} | ${selectedSample!.status}',
                 style: AdvantaText.body2.copyWith(
                   color: highlight,
                   fontWeight: FontWeight.w800,
@@ -1868,21 +5770,21 @@ class _BrandHeader extends StatelessWidget {
                   Expanded(
                     child: _HeaderStat(
                       label: 'Hybrid',
-                      value: selectedSample.hybrid,
+                      value: selectedSample?.hybrid ?? '-',
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: _HeaderStat(
                       label: 'Test',
-                      value: selectedSample.testType,
+                      value: selectedSample?.testType ?? '-',
                     ),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: _HeaderStat(
                       label: 'PIC',
-                      value: selectedSample.pic,
+                      value: selectedSample?.pic ?? '-',
                     ),
                   ),
                 ],
@@ -1950,74 +5852,6 @@ class _HeaderStat extends StatelessWidget {
   }
 }
 
-class _GotFetSample {
-  final String lotId;
-  final String sampleId;
-  final String hybrid;
-  final String crop;
-  final String season;
-  final String testType;
-  final String pic;
-  final DateTime dueDate;
-  final List<_TrackingStep> steps;
-  String status;
-
-  _GotFetSample({
-    required this.lotId,
-    required this.sampleId,
-    required this.hybrid,
-    required this.crop,
-    required this.season,
-    required this.testType,
-    required this.status,
-    required this.pic,
-    required this.dueDate,
-    required this.steps,
-  });
-
-  bool get isOverdue {
-    final today = DateTime.now();
-    final currentDay = DateTime(today.year, today.month, today.day);
-    final dueDay = DateTime(dueDate.year, dueDate.month, dueDate.day);
-    return dueDay.isBefore(currentDay) &&
-        status != 'Approved' &&
-        status != 'Completed';
-  }
-}
-
-class _TrackingStep {
-  final String label;
-  final DateTime date;
-  final bool done;
-
-  const _TrackingStep(this.label, this.date, this.done);
-}
-
-class _MetricData {
-  final String label;
-  final String value;
-  final IconData icon;
-  final Color color;
-
-  const _MetricData(this.label, this.value, this.icon, this.color);
-}
-
-class _MenuAction {
-  final String title;
-  final String subtitle;
-  final IconData icon;
-  final _GotFetPage page;
-  final String? logoAsset;
-
-  const _MenuAction(
-    this.title,
-    this.subtitle,
-    this.icon,
-    this.page, {
-    this.logoAsset,
-  });
-}
-
 class _PanelCard extends StatelessWidget {
   final Widget child;
 
@@ -2035,6 +5869,150 @@ class _PanelCard extends StatelessWidget {
         boxShadow: _gotFetShadow(context),
       ),
       child: child,
+    );
+  }
+}
+
+class _SampleSearchTile extends StatelessWidget {
+  final _GotFetSample sample;
+  final bool isSelected;
+  final Color statusColor;
+  final VoidCallback onTap;
+
+  const _SampleSearchTile({
+    required this.sample,
+    required this.isSelected,
+    required this.statusColor,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = _gotFetIsDark(context);
+    final accentColor = sample.testType.toUpperCase().contains('FET')
+        ? AdvantaColors.greenDark
+        : AdvantaColors.green;
+    final backgroundColor = isSelected
+        ? (isDark
+            ? AdvantaColors.green.withAlpha(38)
+            : AdvantaColors.greenSoft.withAlpha(220))
+        : (isDark ? Colors.white.withAlpha(7) : AdvantaColors.lightSurface);
+
+    final chips = [
+      sample.testType,
+      sample.category,
+      sample.processStage,
+      sample.location,
+      sample.statusSample,
+    ].where((value) => value.trim().isNotEmpty && value != '-').toList();
+
+    return Material(
+      color: backgroundColor,
+      borderRadius: AdvantaRadius.cardRadius,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: AdvantaRadius.cardRadius,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: accentColor.withAlpha(isDark ? 42 : 22),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  Icons.qr_code_2_rounded,
+                  color: accentColor,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      sample.lotId,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Batch ${sample.batch} | ${sample.hybrid}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (chips.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final chip in chips)
+                            _SampleSearchChip(label: chip),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _StatusPill(label: sample.status, color: statusColor),
+                  if (isSelected) ...[
+                    const SizedBox(height: 8),
+                    Icon(
+                      Icons.check_circle_rounded,
+                      color: AdvantaColors.green,
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SampleSearchChip extends StatelessWidget {
+  final String label;
+
+  const _SampleSearchChip({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = _gotFetIsDark(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color:
+            isDark ? Colors.white.withAlpha(10) : AdvantaColors.lightBackground,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: _gotFetBorderColor(context)),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AdvantaText.caption.copyWith(
+          color: _gotFetMutedColor(context),
+          fontWeight: FontWeight.w800,
+        ),
+      ),
     );
   }
 }
@@ -2123,34 +6101,22 @@ class _FeatureLogoTile extends StatelessWidget {
   }
 }
 
-class _NavLogo extends StatelessWidget {
+class _SegmentLogo extends StatelessWidget {
   final String asset;
-  final bool selected;
 
-  const _NavLogo({
-    required this.asset,
-    this.selected = false,
-  });
+  const _SegmentLogo({required this.asset});
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedScale(
-      scale: selected ? 1.08 : 1,
-      duration: const Duration(milliseconds: 160),
-      child: Container(
-        width: 28,
-        height: 28,
-        padding: const EdgeInsets.all(2),
-        decoration: BoxDecoration(
-          color:
-              selected ? AdvantaColors.green.withAlpha(24) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: selected ? _GotFetUi.green : Colors.transparent,
-            width: 1,
-          ),
-        ),
-        child: Image.asset(asset, fit: BoxFit.contain),
+    return Image.asset(
+      asset,
+      width: 20,
+      height: 20,
+      fit: BoxFit.contain,
+      errorBuilder: (_, __, ___) => Icon(
+        Icons.fact_check_rounded,
+        color: _gotFetTextColor(context),
+        size: 18,
       ),
     );
   }
@@ -2579,66 +6545,137 @@ class _PlotMarkerFrame extends StatelessWidget {
   }
 }
 
-class _IndicatorGrid extends StatelessWidget {
-  final List<(String, String, IconData)> items;
+class _WorkflowProgressCard extends StatelessWidget {
+  final String title;
+  final String subtitle;
+  final List<_WorkflowStepData> steps;
 
-  const _IndicatorGrid({required this.items});
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns = constraints.maxWidth > 640 ? 4 : 2;
-        return GridView.count(
-          crossAxisCount: columns,
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisSpacing: 10,
-          mainAxisSpacing: 10,
-          childAspectRatio: 2.4,
-          children: [
-            for (final item in items)
-              _IndicatorChip(label: item.$1, value: item.$2, icon: item.$3),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _IndicatorChip extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-
-  const _IndicatorChip({
-    required this.label,
-    required this.value,
-    required this.icon,
+  const _WorkflowProgressCard({
+    required this.title,
+    required this.subtitle,
+    required this.steps,
   });
 
   @override
   Widget build(BuildContext context) {
+    final completed = steps.where((step) => step.done).length;
+    final color = completed == steps.length
+        ? AdvantaColors.success
+        : AdvantaColors.warning;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: color.withAlpha(_gotFetIsDark(context) ? 46 : 24),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.route_rounded, color: color),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _StatusPill(label: '$completed/${steps.length}', color: color),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final step in steps) _WorkflowStepChip(step: step),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _WorkflowStepChip extends StatelessWidget {
+  final _WorkflowStepData step;
+
+  const _WorkflowStepChip({required this.step});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = step.done
+        ? AdvantaColors.success
+        : step.active
+            ? AdvantaColors.primaryGreen
+            : AdvantaColors.mutedGrey;
     final isDark = _gotFetIsDark(context);
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      constraints: const BoxConstraints(minWidth: 128, maxWidth: 168),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
       decoration: BoxDecoration(
-        color: AdvantaColors.success.withAlpha(isDark ? 45 : 22),
-        borderRadius: BorderRadius.circular(12),
+        color: color.withAlpha(isDark ? 50 : 22),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withAlpha(step.active ? 170 : 95)),
       ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: AdvantaColors.success, size: 18),
-          const SizedBox(width: 8),
+          Icon(
+            step.done ? Icons.check_circle_rounded : step.icon,
+            size: 18,
+            color: isDark ? Colors.white : color,
+          ),
+          const SizedBox(width: 7),
           Expanded(
-            child: Text(
-              '$label\n$value',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: AdvantaText.caption.copyWith(
-                color: _gotFetTextColor(context),
-                fontWeight: FontWeight.w900,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  step.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.caption.copyWith(
+                    color: _gotFetTextColor(context),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  step.detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.caption.copyWith(
+                    color: _gotFetMutedColor(context),
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -2670,13 +6707,61 @@ class _InfoRow extends StatelessWidget {
             ),
           ),
         ),
-        Text(
-          value,
-          style: AdvantaText.bodyBold.copyWith(
-            color: valueColor ?? _gotFetTextColor(context),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Text(
+            value,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.end,
+            style: AdvantaText.bodyBold.copyWith(
+              color: valueColor ?? _gotFetTextColor(context),
+            ),
           ),
         ),
       ],
+    );
+  }
+}
+
+class _InlineStatusMessage extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String text;
+
+  const _InlineStatusMessage({
+    required this.icon,
+    required this.color,
+    required this.text,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withAlpha(_gotFetIsDark(context) ? 42 : 20),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withAlpha(90)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AdvantaText.caption.copyWith(
+                color: _gotFetTextColor(context),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2685,11 +6770,15 @@ class _TimelineRow extends StatelessWidget {
   final _TrackingStep step;
   final bool isLast;
   final DateFormat dateTimeFormat;
+  final String? actor;
+  final String? remarks;
 
   const _TimelineRow({
     required this.step,
     required this.isLast,
     required this.dateTimeFormat,
+    this.actor,
+    this.remarks,
   });
 
   @override
@@ -2729,22 +6818,43 @@ class _TimelineRow extends StatelessWidget {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(bottom: 14),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Text(
-                      step.label,
-                      style: AdvantaText.bodyBold.copyWith(
-                        color: _gotFetTextColor(context),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          step.label,
+                          style: AdvantaText.bodyBold.copyWith(
+                            color: _gotFetTextColor(context),
+                          ),
+                        ),
+                      ),
+                      Text(
+                        dateTimeFormat.format(step.date),
+                        style: AdvantaText.caption.copyWith(
+                          color: _gotFetMutedColor(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if ((actor?.isNotEmpty ?? false) ||
+                      (remarks?.isNotEmpty ?? false)) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      [
+                        if (actor?.isNotEmpty ?? false) actor!,
+                        if (remarks?.isNotEmpty ?? false) remarks!,
+                      ].join(' | '),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
-                  ),
-                  Text(
-                    dateTimeFormat.format(step.date),
-                    style: AdvantaText.caption.copyWith(
-                      color: _gotFetMutedColor(context),
-                    ),
-                  ),
+                  ],
                 ],
               ),
             ),
@@ -2781,6 +6891,112 @@ class _StatusPill extends StatelessWidget {
           color: isDark ? Colors.white : color,
           fontWeight: FontWeight.w900,
         ),
+      ),
+    );
+  }
+}
+
+class _FetReplicationMiniStatus extends StatelessWidget {
+  final int replication;
+  final bool selected;
+  final bool photoReady;
+  final bool submitted;
+  final int openItems;
+  final double emergence;
+
+  const _FetReplicationMiniStatus({
+    required this.replication,
+    required this.selected,
+    required this.photoReady,
+    required this.submitted,
+    required this.openItems,
+    required this.emergence,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = _gotFetIsDark(context);
+    final color = selected ? AdvantaColors.primaryGreen : AdvantaColors.navy;
+    final background = selected
+        ? color.withAlpha(isDark ? 52 : 26)
+        : (isDark ? Colors.white.withAlpha(8) : AdvantaColors.lightSurface);
+    final textColor = selected
+        ? (isDark ? Colors.white : AdvantaColors.greenDark)
+        : _gotFetTextColor(context);
+
+    return Container(
+      constraints: const BoxConstraints(minWidth: 144, maxWidth: 220),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      decoration: BoxDecoration(
+        color: background,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: selected ? color.withAlpha(180) : _gotFetBorderColor(context),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                selected
+                    ? Icons.radio_button_checked_rounded
+                    : Icons.radio_button_unchecked_rounded,
+                size: 18,
+                color: selected
+                    ? AdvantaColors.primaryGreen
+                    : _gotFetMutedColor(context),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  'Ulangan $replication',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.bodyBold.copyWith(color: textColor),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '${emergence.toStringAsFixed(1)}% emergence',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AdvantaText.caption.copyWith(
+              color: _gotFetMutedColor(context),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              _StatusPill(
+                label: photoReady ? 'Foto ada' : 'Belum foto',
+                color: photoReady ? AdvantaColors.success : AdvantaColors.gold,
+              ),
+              _StatusPill(
+                label: openItems == 0 ? 'Kroscek OK' : '$openItems terbuka',
+                color: openItems == 0
+                    ? AdvantaColors.success
+                    : AdvantaColors.warning,
+              ),
+              _StatusPill(
+                label: selected
+                    ? submitted
+                        ? 'Submit'
+                        : 'Draft'
+                    : 'Pilih cek',
+                color: selected && submitted
+                    ? AdvantaColors.primaryGreen
+                    : AdvantaColors.mutedGrey,
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -2823,15 +7039,23 @@ class _MiniFact extends StatelessWidget {
 class _CounterRow extends StatelessWidget {
   final String label;
   final int value;
+  final TextEditingController controller;
   final VoidCallback onAdd;
   final VoidCallback onRemove;
+  final ValueChanged<String> onChanged;
 
   const _CounterRow({
     required this.label,
     required this.value,
+    required this.controller,
     required this.onAdd,
     required this.onRemove,
+    required this.onChanged,
   });
+
+  void _triggerHaptic() {
+    HapticFeedback.vibrate();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2850,22 +7074,42 @@ class _CounterRow extends StatelessWidget {
           ),
           IconButton.filledTonal(
             tooltip: 'Kurangi $label',
-            onPressed: onRemove,
+            onPressed: () {
+              _triggerHaptic();
+              onRemove();
+            },
             icon: const Icon(Icons.remove_rounded),
           ),
           SizedBox(
-            width: 48,
-            child: Text(
-              '$value',
-              textAlign: TextAlign.center,
-              style: AdvantaText.bodyBold.copyWith(
-                color: _gotFetTextColor(context),
+            width: 76,
+            child: Semantics(
+              label: '$label $value',
+              textField: true,
+              child: TextField(
+                controller: controller,
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                onChanged: onChanged,
+                decoration: InputDecoration(
+                  isDense: true,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                  filled: true,
+                  fillColor: Theme.of(context).inputDecorationTheme.fillColor,
+                ),
+                style: AdvantaText.bodyBold.copyWith(
+                  color: _gotFetTextColor(context),
+                ),
               ),
             ),
           ),
           IconButton.filled(
             tooltip: 'Tambah $label',
-            onPressed: onAdd,
+            onPressed: () {
+              _triggerHaptic();
+              onAdd();
+            },
             icon: const Icon(Icons.add_rounded),
             style: IconButton.styleFrom(
               backgroundColor: _GotFetUi.green,
@@ -2927,68 +7171,193 @@ class _DualActionBar extends StatelessWidget {
   }
 }
 
-class _PhotoThumb extends StatelessWidget {
-  const _PhotoThumb();
+class _GotEvidenceEmptyFolder extends StatelessWidget {
+  final _GotEvidenceCategory category;
+  final int count;
 
-  @override
-  Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 1,
-      child: Container(
-        decoration: BoxDecoration(
-          color: const Color(0xFF14210D),
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: CustomPaint(painter: _MiniPlantPainter()),
-      ),
-    );
-  }
-}
-
-class _EvidencePhotoThumb extends StatelessWidget {
-  final File file;
-  final VoidCallback onRemove;
-
-  const _EvidencePhotoThumb({
-    required this.file,
-    required this.onRemove,
+  const _GotEvidenceEmptyFolder({
+    required this.category,
+    required this.count,
   });
 
   @override
   Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 1,
-      child: Stack(
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      decoration: BoxDecoration(
+        color: _gotFetIsDark(context)
+            ? Colors.white.withAlpha(8)
+            : AdvantaColors.lightBackground,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _gotFetBorderColor(context)),
+      ),
+      child: Row(
         children: [
-          Positioned.fill(
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.file(file, fit: BoxFit.cover),
-            ),
+          Icon(
+            Icons.folder_off_rounded,
+            color: _gotFetMutedColor(context),
           ),
-          Positioned(
-            top: 4,
-            right: 4,
-            child: InkWell(
-              onTap: onRemove,
-              borderRadius: BorderRadius.circular(999),
-              child: Container(
-                width: 22,
-                height: 22,
-                decoration: BoxDecoration(
-                  color: Colors.black.withAlpha(160),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.close_rounded,
-                  color: Colors.white,
-                  size: 15,
-                ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              count == 0
+                  ? 'Belum ada temuan ${category.title} untuk stage ini.'
+                  : 'Slot foto akan muncul setelah jumlah ${category.title} terbaca.',
+              style: AdvantaText.caption.copyWith(
+                color: _gotFetMutedColor(context),
+                fontWeight: FontWeight.w800,
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _GotEvidenceSlotTile extends StatelessWidget {
+  final _GotEvidenceSlot slot;
+  final _GotEvidencePhoto? photo;
+  final Color color;
+  final bool syncing;
+  final VoidCallback onCapture;
+  final VoidCallback onGallery;
+  final VoidCallback? onView;
+
+  const _GotEvidenceSlotTile({
+    required this.slot,
+    required this.photo,
+    required this.color,
+    required this.syncing,
+    required this.onCapture,
+    required this.onGallery,
+    required this.onView,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = _gotFetIsDark(context);
+    final hasPhoto = photo != null;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.white.withAlpha(8) : AdvantaColors.lightSurface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: hasPhoto ? color.withAlpha(120) : _gotFetBorderColor(context),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              GestureDetector(
+                onTap: onView,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SizedBox(
+                    width: 64,
+                    height: 64,
+                    child: hasPhoto
+                        ? Image.network(
+                            photo!.photoUrl,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                                _EvidenceThumbFallback(
+                              icon: Icons.broken_image_rounded,
+                              color: color,
+                            ),
+                          )
+                        : _EvidenceThumbFallback(
+                            icon: Icons.add_a_photo_rounded,
+                            color: color,
+                          ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${slot.label} - ${slot.category.title}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      hasPhoto
+                          ? 'Foto tersimpan${photo!.uploadedAt == null ? '' : ' | ${photo!.uploadedAt!.toLocal().toString().substring(0, 16)}'}'
+                          : 'Belum ada foto evidence',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (syncing)
+                const SizedBox(
+                  width: 26,
+                  height: 26,
+                  child: CircularProgressIndicator(strokeWidth: 2.3),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: syncing ? null : onCapture,
+                  icon: const Icon(Icons.camera_alt_rounded),
+                  label: Text(hasPhoto ? 'Ganti Foto' : 'Ambil Foto'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                tooltip: 'Pilih dari gallery',
+                onPressed: syncing ? null : onGallery,
+                icon: const Icon(Icons.photo_library_rounded),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                tooltip: 'Lihat foto',
+                onPressed: onView,
+                icon: const Icon(Icons.visibility_rounded),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EvidenceThumbFallback extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+
+  const _EvidenceThumbFallback({
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: color.withAlpha(_gotFetIsDark(context) ? 46 : 24),
+      child: Icon(icon, color: color),
     );
   }
 }
@@ -3019,6 +7388,250 @@ class _PlotPhotoPreview extends StatelessWidget {
   }
 }
 
+class _FetPhotoReviewBoard extends StatelessWidget {
+  final File file;
+  final List<_FetPointStatus> points;
+  final Color Function(_FetPointStatus status) statusColor;
+  final String Function(_FetPointStatus status) statusLabel;
+  final ValueChanged<int> onTap;
+  final ValueChanged<int> onLongPress;
+
+  const _FetPhotoReviewBoard({
+    required this.file,
+    required this.points,
+    required this.statusColor,
+    required this.statusLabel,
+    required this.onTap,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = _gotFetIsDark(context);
+
+    return AspectRatio(
+      aspectRatio: 1,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: ColoredBox(
+          color: Colors.black,
+          child: InteractiveViewer(
+            minScale: 1,
+            maxScale: 4,
+            boundaryMargin: const EdgeInsets.all(80),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                Image.file(
+                  file,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => const _PlotPreview(),
+                ),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withAlpha(isDark ? 18 : 8),
+                  ),
+                ),
+                CustomPaint(
+                  painter: _FetPhotoGridPainter(
+                    lineColor: Colors.white.withAlpha(92),
+                  ),
+                ),
+                GridView.builder(
+                  physics: const NeverScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: _fetGridColumns,
+                  ),
+                  itemCount: points.length,
+                  itemBuilder: (context, index) {
+                    final status = points[index];
+                    final color = statusColor(status);
+                    return GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => onTap(index),
+                      onLongPress: () => onLongPress(index),
+                      child: Center(
+                        child: _FetPointMarker(
+                          label: statusLabel(status),
+                          color: color,
+                          filled: status != _FetPointStatus.grown,
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FetReviewPhotoBoard extends StatelessWidget {
+  final File? file;
+  final String? photoUrl;
+  final List<_FetPointStatus> points;
+  final Color Function(_FetPointStatus status) statusColor;
+  final String Function(_FetPointStatus status) statusLabel;
+
+  const _FetReviewPhotoBoard({
+    required this.file,
+    required this.photoUrl,
+    required this.points,
+    required this.statusColor,
+    required this.statusLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AspectRatio(
+      aspectRatio: 1,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: ColoredBox(
+          color: Colors.black,
+          child: InteractiveViewer(
+            minScale: 1,
+            maxScale: 4,
+            boundaryMargin: const EdgeInsets.all(80),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (file != null)
+                  Image.file(
+                    file!,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const _PlotPreview(),
+                  )
+                else
+                  Image.network(
+                    photoUrl ?? '',
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => const _PlotPreview(),
+                  ),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withAlpha(18),
+                  ),
+                ),
+                CustomPaint(
+                  painter: _FetPhotoGridPainter(
+                    lineColor: Colors.white.withAlpha(92),
+                  ),
+                ),
+                GridView.builder(
+                  physics: const NeverScrollableScrollPhysics(),
+                  padding: EdgeInsets.zero,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: _fetGridColumns,
+                  ),
+                  itemCount: points.length,
+                  itemBuilder: (context, index) {
+                    final status = points[index];
+                    return Center(
+                      child: _FetPointMarker(
+                        label: statusLabel(status),
+                        color: statusColor(status),
+                        filled: status != _FetPointStatus.grown,
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FetPointMarker extends StatelessWidget {
+  final String label;
+  final Color color;
+  final bool filled;
+
+  const _FetPointMarker({
+    required this.label,
+    required this.color,
+    required this.filled,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FractionallySizedBox(
+      widthFactor: 0.68,
+      heightFactor: 0.68,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: filled ? color.withAlpha(215) : color.withAlpha(118),
+          border: Border.all(color: Colors.white.withAlpha(210), width: 1.2),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withAlpha(75),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
+        ),
+        child: Center(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: Text(
+                label,
+                maxLines: 1,
+                style: AdvantaText.caption.copyWith(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                  shadows: const [
+                    Shadow(
+                      color: Colors.black54,
+                      blurRadius: 2,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FetPhotoGridPainter extends CustomPainter {
+  final Color lineColor;
+
+  const _FetPhotoGridPainter({required this.lineColor});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = lineColor
+      ..strokeWidth = 1;
+
+    for (var i = 1; i < _fetGridColumns; i++) {
+      final x = size.width * i / _fetGridColumns;
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+    for (var i = 1; i < _fetGridRows; i++) {
+      final y = size.height * i / _fetGridRows;
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _FetPhotoGridPainter oldDelegate) {
+    return lineColor != oldDelegate.lineColor;
+  }
+}
+
 class _FetPointGrid extends StatelessWidget {
   final List<_FetPointStatus> points;
   final Color Function(_FetPointStatus status) statusColor;
@@ -3036,11 +7649,11 @@ class _FetPointGrid extends StatelessWidget {
   Widget build(BuildContext context) {
     final isDark = _gotFetIsDark(context);
     return AspectRatio(
-      aspectRatio: 10 / 5,
+      aspectRatio: _fetGridColumns / _fetGridRows,
       child: GridView.builder(
         physics: const NeverScrollableScrollPhysics(),
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 10,
+          crossAxisCount: _fetGridColumns,
           crossAxisSpacing: 5,
           mainAxisSpacing: 5,
         ),
@@ -3175,28 +7788,18 @@ class _PlotFieldPainter extends CustomPainter {
     final rowPaint = Paint()
       ..color = const Color(0xFF5A3F17).withAlpha(150)
       ..strokeWidth = 8;
-    for (var y = size.height * 0.12; y < size.height; y += size.height / 9) {
+    for (var y = size.height * 0.08; y < size.height; y += size.height / 11) {
       canvas.drawLine(Offset(0, y), Offset(size.width, y + 10), rowPaint);
     }
 
     final pointPaint = Paint()..color = AdvantaColors.lightGreen;
-    for (var r = 0; r < 5; r++) {
-      for (var c = 0; c < 10; c++) {
-        final dx = size.width * (0.08 + c * 0.093);
-        final dy = size.height * (0.18 + r * 0.16);
-        canvas.drawCircle(Offset(dx, dy), 4.5, pointPaint);
+    for (var r = 0; r < _fetGridRows; r++) {
+      for (var c = 0; c < _fetGridColumns; c++) {
+        final dx = size.width * (0.07 + c * 0.095);
+        final dy = size.height * (0.1 + r * 0.087);
+        canvas.drawCircle(Offset(dx, dy), 3.8, pointPaint);
       }
     }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-class _MiniPlantPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    _GotPlantPainter().paint(canvas, size);
   }
 
   @override
@@ -3219,7 +7822,9 @@ class _MarkerFramePainter extends CustomPainter {
       ..strokeWidth = 4
       ..strokeCap = StrokeCap.round;
     const len = 34.0;
-    final rect = Rect.fromLTWH(12, 46, size.width - 24, size.height - 150);
+    final contentRect =
+        Rect.fromLTWH(12, 46, size.width - 24, size.height - 150);
+    final rect = showGrid ? _squareRectInside(contentRect) : contentRect;
 
     canvas.drawLine(
         rect.topLeft, rect.topLeft + const Offset(len, 0), linePaint);
@@ -3250,12 +7855,12 @@ class _MarkerFramePainter extends CustomPainter {
       final gridPaint = Paint()
         ..color = Colors.white.withAlpha(95)
         ..strokeWidth = 1;
-      for (var i = 1; i < 10; i++) {
-        final x = rect.left + rect.width * i / 10;
+      for (var i = 1; i < _fetGridColumns; i++) {
+        final x = rect.left + rect.width * i / _fetGridColumns;
         canvas.drawLine(Offset(x, rect.top), Offset(x, rect.bottom), gridPaint);
       }
-      for (var i = 1; i < 5; i++) {
-        final y = rect.top + rect.height * i / 5;
+      for (var i = 1; i < _fetGridRows; i++) {
+        final y = rect.top + rect.height * i / _fetGridRows;
         canvas.drawLine(Offset(rect.left, y), Offset(rect.right, y), gridPaint);
       }
     }
@@ -3263,4 +7868,9 @@ class _MarkerFramePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+
+  Rect _squareRectInside(Rect rect) {
+    final side = math.min(rect.width, rect.height);
+    return Rect.fromCenter(center: rect.center, width: side, height: side);
+  }
 }
