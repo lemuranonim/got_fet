@@ -31,6 +31,8 @@ class _GotFetSample {
   String location;
   double? fieldArea;
   final String statusGot2;
+  final String statusGotVeg;
+  final String finalStatusGot;
   String statusSample;
   final String? vegetativeObservationNo;
   final String? finalObservationNo;
@@ -69,6 +71,8 @@ class _GotFetSample {
     this.location = '-',
     this.fieldArea,
     this.statusGot2 = '-',
+    this.statusGotVeg = '-',
+    this.finalStatusGot = '-',
     this.statusSample = '-',
     this.vegetativeObservationNo,
     this.finalObservationNo,
@@ -279,4 +283,47 @@ class _FetObservationResult {
     required this.submittedAt,
     required this.pointStatuses,
   });
+}
+
+class _FetAutoDetectionResult {
+  final File standardizedFile;
+  final List<_FetPointStatus> pointStatuses;
+  final List<double> greenRatios;
+  final int sourceWidth;
+  final int sourceHeight;
+  final int cropLeft;
+  final int cropTop;
+  final int cropSize;
+  final int standardizedSize;
+  final DateTime analyzedAt;
+
+  const _FetAutoDetectionResult({
+    required this.standardizedFile,
+    required this.pointStatuses,
+    required this.greenRatios,
+    required this.sourceWidth,
+    required this.sourceHeight,
+    required this.cropLeft,
+    required this.cropTop,
+    required this.cropSize,
+    required this.standardizedSize,
+    required this.analyzedAt,
+  });
+
+  int get grownCount => _count(_FetPointStatus.grown);
+
+  int get notGrownCount => _count(_FetPointStatus.notGrown);
+
+  int get reviewCount => _count(_FetPointStatus.review);
+
+  double get emergencePercent =>
+      pointStatuses.isEmpty ? 0 : grownCount / pointStatuses.length * 100;
+
+  double get confidencePercent => pointStatuses.isEmpty
+      ? 0
+      : (pointStatuses.length - reviewCount) / pointStatuses.length * 100;
+
+  int _count(_FetPointStatus status) {
+    return pointStatuses.where((point) => point == status).length;
+  }
 }

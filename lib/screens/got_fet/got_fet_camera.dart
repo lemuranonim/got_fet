@@ -20,6 +20,7 @@ class _StandaloneCameraScreen extends StatefulWidget {
 
 class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
   static const _toleranceDegrees = 8.0;
+  static const _gotSteadyHintDegrees = 14.0;
   static const _requiredStableDuration = Duration(milliseconds: 600);
 
   camera.CameraController? _controller;
@@ -135,6 +136,19 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
     try {
       await controller.setExposureMode(camera.ExposureMode.auto);
     } catch (_) {}
+    try {
+      await controller.setFocusPoint(const Offset(.5, .5));
+    } catch (_) {}
+    try {
+      await controller.setExposurePoint(const Offset(.5, .5));
+    } catch (_) {}
+  }
+
+  Future<void> _refreshFocusBeforeCapture(
+    camera.CameraController controller,
+  ) async {
+    if (widget.module != _InspectionModule.got) return;
+    await _configureAutoFocus(controller);
   }
 
   void _handleAccelerometer(AccelerometerEvent event) {
@@ -176,6 +190,7 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
 
     setState(() => _isCapturing = true);
     try {
+      await _refreshFocusBeforeCapture(controller);
       final image = await controller.takePicture();
       if (!mounted) return;
       HapticFeedback.mediumImpact();
@@ -228,17 +243,32 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
           );
     final hasError = _usesStabilityGate && _sensorError != null;
     final cameraHasError = _cameraError != null;
+    final gotSteady = reading == null ||
+        reading.angleDegrees <= _gotSteadyHintDegrees ||
+        _sensorError != null;
     final statusColor = hasError
         ? AdvantaColors.error
-        : (!_usesStabilityGate && _cameraReady) || _captureEnabled
-            ? AdvantaColors.success
-            : reading?.isAligned == true
-                ? AdvantaColors.warning
-                : _gotFetMutedColor(context);
+        : !_usesStabilityGate
+            ? gotSteady
+                ? AdvantaColors.success
+                : AdvantaColors.warning
+            : _captureEnabled
+                ? AdvantaColors.success
+                : reading?.isAligned == true
+                    ? AdvantaColors.warning
+                    : _gotFetMutedColor(context);
     final statusText = hasError
         ? 'Sensor kemiringan tidak tersedia'
-        : !_usesStabilityGate && _cameraReady
-            ? 'Autofocus aktif - siap capture'
+        : !_usesStabilityGate
+            ? !_cameraReady
+                ? 'Menyiapkan autofocus...'
+                : _sensorError != null
+                    ? 'Autofocus aktif - sensor stabilitas tidak tersedia'
+                    : reading == null
+                        ? 'Autofocus aktif - membaca stabilitas tangan'
+                        : gotSteady
+                            ? 'Autofocus aktif - tangan stabil'
+                            : 'Autofocus aktif - tangan agak goyang'
             : reading == null
                 ? 'Membaca sensor kemiringan...'
                 : _captureEnabled
@@ -249,7 +279,7 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
                             ? 'Datar/tegak luruskan kamera ke objek'
                             : 'Tegakkan HP portrait dan luruskan kamera';
     final guidanceText = !_usesStabilityGate
-        ? 'Gyro hanya panduan; jaga objek tetap jelas lalu ambil foto.'
+        ? 'Capture tidak dikunci sensor. Fokus otomatis di tengah frame dan stabilitas hanya menjadi panduan.'
         : 'Ambil foto aktif saat HP datar di atas objek dan stabil.';
 
     return Scaffold(
@@ -355,15 +385,25 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _CameraBalancePanel(
-                      reading: reading,
-                      ready: _captureEnabled,
-                      statusColor: statusColor,
-                      statusText: reading == null
-                          ? statusText
-                          : '$statusText | ${reading.angleDegrees.toStringAsFixed(1)} deg',
-                      guidanceText: guidanceText,
-                    ),
+                    if (_usesStabilityGate)
+                      _CameraBalancePanel(
+                        reading: reading,
+                        ready: _captureEnabled,
+                        statusColor: statusColor,
+                        statusText: reading == null
+                            ? statusText
+                            : '$statusText | ${reading.angleDegrees.toStringAsFixed(1)} deg',
+                        guidanceText: guidanceText,
+                      )
+                    else
+                      _GotCameraAssistPanel(
+                        reading: reading,
+                        ready: _cameraReady,
+                        steady: gotSteady,
+                        statusColor: statusColor,
+                        statusText: statusText,
+                        guidanceText: guidanceText,
+                      ),
                     const SizedBox(height: 14),
                     _StandaloneCaptureButton(
                       enabled: _cameraReady && _captureEnabled && !_isCapturing,
@@ -548,6 +588,130 @@ class _StandaloneCameraTemplatePainter extends CustomPainter {
   Rect _squareRectInside(Rect rect) {
     final side = math.min(rect.width, rect.height);
     return Rect.fromCenter(center: rect.center, width: side, height: side);
+  }
+}
+
+class _GotCameraAssistPanel extends StatelessWidget {
+  final _CameraLevelReading? reading;
+  final bool ready;
+  final bool steady;
+  final Color statusColor;
+  final String statusText;
+  final String guidanceText;
+
+  const _GotCameraAssistPanel({
+    required this.reading,
+    required this.ready,
+    required this.steady,
+    required this.statusColor,
+    required this.statusText,
+    required this.guidanceText,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final angleText = reading == null
+        ? 'Sensor'
+        : '${reading!.angleDegrees.toStringAsFixed(1)} deg';
+    final pillText = ready
+        ? steady
+            ? 'Stabil'
+            : 'Goyang'
+        : 'Memuat';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.black.withAlpha(172),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: statusColor.withAlpha(150)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: statusColor.withAlpha(42),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: statusColor.withAlpha(130)),
+            ),
+            child: Icon(Icons.center_focus_strong_rounded, color: statusColor),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  statusText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.bodyBold.copyWith(color: Colors.white),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  guidanceText,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AdvantaText.caption.copyWith(
+                    color: Colors.white.withAlpha(210),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              _CameraStatusChip(label: pillText, color: statusColor),
+              const SizedBox(height: 6),
+              Text(
+                angleText,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: AdvantaText.caption.copyWith(
+                  color: Colors.white.withAlpha(190),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CameraStatusChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _CameraStatusChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withAlpha(45),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: AdvantaText.caption.copyWith(
+          color: Colors.white,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
   }
 }
 

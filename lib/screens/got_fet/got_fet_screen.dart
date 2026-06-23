@@ -82,10 +82,8 @@ enum _GotFetPage {
   home,
   lotTracking,
   gotPlantingData,
-  gotWorkspace,
   gotPhoto,
   gotInput,
-  fetWorkspace,
   fetPhoto,
   fetAnalysis,
   fetInput,
@@ -103,6 +101,9 @@ enum _InspectionModule { got, fet }
 const _fetGridColumns = 10;
 const _fetGridRows = 10;
 const _fetGridPointCount = _fetGridColumns * _fetGridRows;
+const _fetStandardImageSize = 1200;
+const _fetGreenHighThreshold = 0.035;
+const _fetGreenLowThreshold = 0.012;
 
 class GotFetScreen extends StatefulWidget {
   const GotFetScreen({super.key});
@@ -114,6 +115,7 @@ class GotFetScreen extends StatefulWidget {
 class _GotFetScreenState extends State<GotFetScreen> {
   static const _batchListPageSize = 20;
   static const _gotPlotId = 'G1 - U1';
+  static const _gotMaxEvidenceSlotsPerCategory = 6;
 
   static const _gotLocationOptions = ['Malang', 'Tulungagung', 'Pasuruan'];
   static const _gotFieldAreaOptions = [0.009, 0.010, 0.012, 0.015, 0.020];
@@ -122,6 +124,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     'Fresh',
     'Resample 1',
     'Resample 2',
+    'Request New Sample',
   ];
 
   final _gotFetService = GotFetService();
@@ -186,6 +189,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
   List<_ReviewTimelineEvent> _reviewTimelineEvents = [];
   final Map<int, File> _fetPlotPhotosByReplication = {};
   final Map<int, _SmartPhotoMetadata> _fetPlotMetadataByReplication = {};
+  final Map<int, _FetAutoDetectionResult> _fetAutoDetectionByReplication = {};
+  int? _analyzingFetReplication;
   _FetObservationResult? _latestFetObservation;
   _SmartPhotoStatus _smartPhotoStatus = const _SmartPhotoStatus();
 
@@ -282,6 +287,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     var approved = 0;
 
     for (final sample in _samples) {
+      if (!_sampleSupportsModule(sample, _activeModuleCode)) continue;
       final status = sample.status.toLowerCase();
       if (sample.isOverdue) overdue++;
       if (!_sampleObservationDone(sample)) pending++;
@@ -294,6 +300,48 @@ class _GotFetScreenState extends State<GotFetScreen> {
       pending: pending,
       review: review,
       approved: approved,
+    );
+  }
+
+  ({
+    int beforePlanting,
+    int plantingReady,
+    int vegetative,
+    int generative,
+    int requestSample,
+    int completed,
+  }) get _gotStageSummary {
+    var beforePlanting = 0;
+    var plantingReady = 0;
+    var vegetative = 0;
+    var generative = 0;
+    var requestSample = 0;
+    var completed = 0;
+
+    for (final sample in _samples) {
+      if (!_sampleSupportsModule(sample, 'GOT')) continue;
+      if (_sampleRequestsNewSample(sample)) {
+        requestSample++;
+      } else if (_sampleFinalConfirmed(sample)) {
+        completed++;
+      } else if (!_samplePlantingReady(sample)) {
+        beforePlanting++;
+      } else if (!_sampleVegetativeSubmitted(sample)) {
+        plantingReady++;
+      } else if (!_sampleGenerativeSubmitted(sample)) {
+        vegetative++;
+      } else {
+        generative++;
+      }
+    }
+
+    return (
+      beforePlanting: beforePlanting,
+      plantingReady: plantingReady,
+      vegetative: vegetative,
+      generative: generative,
+      requestSample: requestSample,
+      completed: completed,
     );
   }
 
@@ -323,28 +371,23 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final productSource = _normalizeRuleText(
       '${sample.category} ${sample.processStage} ${sample.reasonTesting} ${sample.testType}',
     );
-    final typeSource =
-        _normalizeRuleText('${sample.typeSeed} ${sample.category}');
+    final typeSource = _normalizeRuleText(
+      '${sample.typeSeed} ${sample.category} ${sample.reasonTesting}',
+    );
     final genderSource = _normalizeRuleText(
-        '${sample.gender} ${sample.typeSeed} ${sample.category}');
+      '${sample.gender} ${sample.typeSeed} ${sample.category}',
+    );
     final allSource = _normalizeRuleText(
       '$productSource $typeSource $genderSource',
     );
 
-    if (_containsRuleTerm(productSource, const [
+    final isParentSeed = _containsRuleTerm(allSource, const [
       'ps',
       'parent seed',
       'parent stock',
-    ])) {
-      if (_containsRuleTerm(genderSource, const ['male', 'jantan'])) {
-        return (label: 'PS Male', threshold: 100);
-      }
-      if (_containsRuleTerm(genderSource, const ['female', 'betina'])) {
-        return (label: 'PS Female', threshold: 99.95);
-      }
-    }
-
-    final isCommercial = _containsRuleTerm(productSource, const [
+      'parental',
+    ]);
+    final isCommercial = _containsRuleTerm(allSource, const [
       'commercial',
       'komersial',
       'komersil',
@@ -363,18 +406,48 @@ class _GotFetScreenState extends State<GotFetScreen> {
       'dent',
     ]);
 
+    final productLabel = isManis
+        ? 'Sweet Corn'
+        : isAtos
+            ? 'Field Corn'
+            : null;
+    final genderLabel = _gotRuleGenderLabel(genderSource);
+
+    if (isParentSeed && !isCommercial) {
+      if (genderLabel == 'Male') {
+        return (
+          label: '${productLabel ?? 'Corn'} PS (Male)',
+          threshold: 100,
+        );
+      }
+      if (genderLabel == 'Female') {
+        return (
+          label: '${productLabel ?? 'Corn'} PS (Female)',
+          threshold: 99.95,
+        );
+      }
+      return (
+        label: '${productLabel ?? 'Corn'} PS (Male/Female)',
+        threshold: 99.95,
+      );
+    }
+
     if (isCommercial || isManis || isAtos) {
-      if (isManis) return (label: 'Komersil Manis', threshold: 97);
-      if (isAtos) return (label: 'Komersil Atos', threshold: 95);
+      if (isManis) return (label: 'Sweet Corn F1', threshold: 97);
+      if (isAtos) return (label: 'Field Corn F1', threshold: 95);
+      return (label: 'Corn F1', threshold: 95);
     }
 
-    if (_containsRuleTerm(allSource, const ['male', 'jantan'])) {
-      return (label: 'PS Male', threshold: 100);
-    }
-    if (_containsRuleTerm(allSource, const ['female', 'betina'])) {
-      return (label: 'PS Female', threshold: 99.95);
-    }
+    return null;
+  }
 
+  String? _gotRuleGenderLabel(String genderSource) {
+    if (_containsRuleTerm(genderSource, const ['male', 'jantan'])) {
+      return 'Male';
+    }
+    if (_containsRuleTerm(genderSource, const ['female', 'betina'])) {
+      return 'Female';
+    }
     return null;
   }
 
@@ -446,6 +519,29 @@ class _GotFetScreenState extends State<GotFetScreen> {
     };
   }
 
+  Color get _gotStageAccentColor => _gotStageColor(_gotObservationStage);
+
+  IconData get _gotStageIcon {
+    return switch (_gotObservationStage) {
+      _GotObservationStage.vegetative => Icons.grass_rounded,
+      _GotObservationStage.finalGenerative => Icons.local_florist_rounded,
+    };
+  }
+
+  String get _gotSubmittedStatusLabel {
+    return switch (_gotObservationStage) {
+      _GotObservationStage.vegetative => 'Vegetative Submitted',
+      _GotObservationStage.finalGenerative => 'Generative Submitted',
+    };
+  }
+
+  Color _gotStageColor(_GotObservationStage stage) {
+    return switch (stage) {
+      _GotObservationStage.vegetative => AdvantaColors.primaryGreen,
+      _GotObservationStage.finalGenerative => const Color(0xFF4361EE),
+    };
+  }
+
   int get _currentReplicationGrown =>
       _countStatus(_currentReplication, _FetPointStatus.grown);
 
@@ -496,10 +592,56 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return _selectedReplication == replication && _latestFetObservation != null;
   }
 
-  bool get _gotPlanningReady {
-    return _selectedSample.plantingDate != null &&
-        _selectedSample.location != '-' &&
-        _selectedSample.fieldArea != null;
+  bool get _gotPlanningReady => _samplePlantingReady(_selectedSample);
+
+  bool _samplePlantingReady(_GotFetSample sample) {
+    return sample.plantingDate != null &&
+        sample.location != '-' &&
+        sample.fieldArea != null;
+  }
+
+  bool _sampleRequestsNewSample(_GotFetSample sample) {
+    final status = _combinedSampleStatus(sample);
+    return status.contains('request new sample') ||
+        status.contains('resample') ||
+        status.contains('resampling');
+  }
+
+  bool _sampleVegetativeSubmitted(_GotFetSample sample) {
+    final status = _combinedSampleStatus(sample);
+    return _statusValuePresent(sample.statusGotVeg) ||
+        status.contains('vegetative submitted') ||
+        status.contains('vegetatif submitted') ||
+        _sampleGenerativeSubmitted(sample) ||
+        _sampleFinalConfirmed(sample);
+  }
+
+  bool _sampleGenerativeSubmitted(_GotFetSample sample) {
+    final status = _combinedSampleStatus(sample);
+    return _statusValuePresent(sample.finalStatusGot) ||
+        status.contains('generative submitted') ||
+        status.contains('final generative') ||
+        status.contains('generatif submitted');
+  }
+
+  bool _statusValuePresent(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized.isNotEmpty &&
+        normalized != '-' &&
+        normalized != 'open' &&
+        normalized != 'fresh' &&
+        normalized != 'null';
+  }
+
+  String _combinedSampleStatus(_GotFetSample sample) {
+    return [
+      sample.status,
+      sample.statusSample,
+      sample.statusGot2,
+      sample.statusGotVeg,
+      sample.finalStatusGot,
+      sample.noteTanam,
+    ].join(' ').toLowerCase();
   }
 
   bool get _gotInputReady =>
@@ -1252,21 +1394,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
         page: _GotFetPage.gotPlantingData,
       ),
       _BatchQuickAction(
-        label: 'Foto GOT',
-        subtitle: 'Ambil evidence tanaman',
-        icon: Icons.center_focus_strong_rounded,
-        page: _GotFetPage.gotPhoto,
-      ),
-      _BatchQuickAction(
         label: 'Input Vegetatif',
-        subtitle: 'Isi hasil pengamatan awal',
+        subtitle: 'Isi hasil dan foto evidence vegetatif',
         icon: Icons.grass_rounded,
         page: _GotFetPage.gotInput,
         stage: _GotObservationStage.vegetative,
       ),
       _BatchQuickAction(
         label: 'Input Generative',
-        subtitle: 'Isi hasil pengamatan generative',
+        subtitle: 'Isi hasil dan foto evidence generative',
         icon: Icons.local_florist_rounded,
         page: _GotFetPage.gotInput,
         stage: _GotObservationStage.finalGenerative,
@@ -1480,10 +1616,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
       _GotFetPage.home => 'Digital $_activeModuleCode',
       _GotFetPage.lotTracking => 'Lot Tracking',
       _GotFetPage.gotPlantingData => 'GOT - Data Tanam',
-      _GotFetPage.gotWorkspace => 'Fitur GOT',
       _GotFetPage.gotPhoto => 'GOT Photo',
-      _GotFetPage.gotInput => 'GOT - Input Hasil',
-      _GotFetPage.fetWorkspace => 'Fitur FET',
+      _GotFetPage.gotInput => 'GOT - $_gotObservationStageLabel',
       _GotFetPage.fetPhoto => 'FET Plot Scanner',
       _GotFetPage.fetAnalysis => 'Hasil Analisa Plot',
       _GotFetPage.fetInput => 'FET - Input Hasil',
@@ -1498,14 +1632,6 @@ class _GotFetScreenState extends State<GotFetScreen> {
       return _session?.name.trim().isNotEmpty == true
           ? _session!.name
           : _activeModuleTitle;
-    }
-
-    if (_page == _GotFetPage.gotWorkspace) {
-      return 'Grow Out Test workflow';
-    }
-
-    if (_page == _GotFetPage.fetWorkspace) {
-      return 'Field Emergence Test workflow';
     }
 
     if (!_hasSamples) {
@@ -1526,12 +1652,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
   String? _moduleForPage(_GotFetPage page) {
     return switch (page) {
       _GotFetPage.gotPlantingData ||
-      _GotFetPage.gotWorkspace ||
       _GotFetPage.gotPhoto ||
       _GotFetPage.gotInput ||
       _GotFetPage.gotReview =>
         'GOT',
-      _GotFetPage.fetWorkspace ||
       _GotFetPage.fetPhoto ||
       _GotFetPage.fetAnalysis ||
       _GotFetPage.fetInput ||
@@ -1607,10 +1731,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
       _GotFetPage.home => _buildHomeDashboard(),
       _GotFetPage.lotTracking => _buildLotTrackingPage(),
       _GotFetPage.gotPlantingData => _buildGotPlantingDataPage(),
-      _GotFetPage.gotWorkspace => _buildGotWorkspacePage(),
       _GotFetPage.gotPhoto => _buildGotPhotoPage(),
       _GotFetPage.gotInput => _buildGotInputPage(),
-      _GotFetPage.fetWorkspace => _buildFetWorkspacePage(),
       _GotFetPage.fetPhoto => _buildFetPhotoPage(),
       _GotFetPage.fetAnalysis => _buildFetAnalysisPage(),
       _GotFetPage.fetInput => _buildFetInputPage(),
@@ -1711,6 +1833,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   Widget _buildHomeDashboard() {
     final summary = _sampleSummary;
+    final gotStageSummary = _gotStageSummary;
     final activeSampleIndexes = _sampleIndexesForModule(_activeModuleCode);
     final headerSample = activeSampleIndexes.contains(_selectedSampleIndex)
         ? _selectedSample
@@ -1740,32 +1863,71 @@ class _GotFetScreenState extends State<GotFetScreen> {
           Text('Ringkasan Hari Ini', style: _sectionTitle(context)),
           const SizedBox(height: 10),
           _MetricGrid(
-            cards: [
-              _MetricData(
-                'Observasi Due',
-                summary.overdue.toString(),
-                Icons.event_busy_rounded,
-                AdvantaColors.error,
-              ),
-              _MetricData(
-                'Belum Dikirim',
-                summary.pending.toString(),
-                Icons.outbox_rounded,
-                AdvantaColors.gold,
-              ),
-              _MetricData(
-                'Menunggu Review',
-                summary.review.toString(),
-                Icons.rate_review_rounded,
-                AdvantaColors.gold,
-              ),
-              _MetricData(
-                'Selesai',
-                summary.approved.toString(),
-                Icons.verified_rounded,
-                AdvantaColors.success,
-              ),
-            ],
+            cards: _activeModule == _InspectionModule.got
+                ? [
+                    _MetricData(
+                      'Belum Planting',
+                      gotStageSummary.beforePlanting.toString(),
+                      Icons.pending_actions_rounded,
+                      AdvantaColors.gold,
+                    ),
+                    _MetricData(
+                      'Data Tanam',
+                      gotStageSummary.plantingReady.toString(),
+                      Icons.edit_calendar_rounded,
+                      AdvantaColors.primaryGreen,
+                    ),
+                    _MetricData(
+                      'Observasi Veg',
+                      gotStageSummary.vegetative.toString(),
+                      Icons.grass_rounded,
+                      AdvantaColors.greenDark,
+                    ),
+                    _MetricData(
+                      'Observasi Gen',
+                      gotStageSummary.generative.toString(),
+                      Icons.local_florist_rounded,
+                      const Color(0xFF4361EE),
+                    ),
+                    _MetricData(
+                      'Request Sample',
+                      gotStageSummary.requestSample.toString(),
+                      Icons.change_circle_rounded,
+                      AdvantaColors.error,
+                    ),
+                    _MetricData(
+                      'Selesai',
+                      gotStageSummary.completed.toString(),
+                      Icons.verified_rounded,
+                      AdvantaColors.success,
+                    ),
+                  ]
+                : [
+                    _MetricData(
+                      'Observasi Due',
+                      summary.overdue.toString(),
+                      Icons.event_busy_rounded,
+                      AdvantaColors.error,
+                    ),
+                    _MetricData(
+                      'Belum Dikirim',
+                      summary.pending.toString(),
+                      Icons.outbox_rounded,
+                      AdvantaColors.gold,
+                    ),
+                    _MetricData(
+                      'Menunggu Review',
+                      summary.review.toString(),
+                      Icons.rate_review_rounded,
+                      AdvantaColors.gold,
+                    ),
+                    _MetricData(
+                      'Selesai',
+                      summary.approved.toString(),
+                      Icons.verified_rounded,
+                      AdvantaColors.success,
+                    ),
+                  ],
           ),
           const SizedBox(height: 18),
           Text('Menu $_activeModuleCode', style: _sectionTitle(context)),
@@ -1775,13 +1937,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _WorkflowSummary(
             steps: const [
               ('Sample', Icons.description_rounded),
-              ('Prepared', Icons.inventory_2_rounded),
-              ('Dispatched', Icons.local_shipping_rounded),
-              ('Received', Icons.move_to_inbox_rounded),
-              ('Planted', Icons.grass_rounded),
-              ('Observed', Icons.eco_rounded),
-              ('Reviewed', Icons.assignment_turned_in_rounded),
-              ('Decision', Icons.verified_rounded),
+              ('Data Tanam', Icons.edit_calendar_rounded),
+              ('Vegetatif', Icons.grass_rounded),
+              ('Generative', Icons.local_florist_rounded),
+              ('Review', Icons.assignment_turned_in_rounded),
+              ('Selesai', Icons.verified_rounded),
             ],
           ),
         ],
@@ -1794,28 +1954,21 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ? [
             _MenuAction(
               'Data Tanam',
-              'Master Data',
+              'Input proses tanam',
               Icons.edit_calendar_rounded,
               _GotFetPage.gotPlantingData,
               logoAsset: _GotFetAssets.gotLogo,
             ),
             _MenuAction(
-              'Foto GOT',
-              'Evidence tanaman',
-              Icons.center_focus_strong_rounded,
-              _GotFetPage.gotPhoto,
-              logoAsset: _GotFetAssets.gotLogo,
-            ),
-            _MenuAction(
               'Vegetatif',
-              'Result awal',
+              'Input + evidence',
               Icons.grass_rounded,
               _GotFetPage.gotInput,
               logoAsset: _GotFetAssets.gotLogo,
             ),
             _MenuAction(
               'Generative',
-              'Hasil generative',
+              'Input + evidence',
               Icons.local_florist_rounded,
               _GotFetPage.gotInput,
               logoAsset: _GotFetAssets.gotLogo,
@@ -1876,136 +2029,6 @@ class _GotFetScreenState extends State<GotFetScreen> {
         }
         _openPage(action.page);
       },
-    );
-  }
-
-  Widget _buildGotWorkspacePage() {
-    final actions = [
-      _MenuAction(
-        'Data Tanam',
-        'Master Data',
-        Icons.edit_calendar_rounded,
-        _GotFetPage.gotPlantingData,
-      ),
-      _MenuAction(
-        'Foto GOT',
-        'Evidence tanaman',
-        Icons.center_focus_strong_rounded,
-        _GotFetPage.gotPhoto,
-        logoAsset: _GotFetAssets.gotLogo,
-      ),
-      _MenuAction(
-        'Vegetatif',
-        'Result awal',
-        Icons.grass_rounded,
-        _GotFetPage.gotInput,
-        logoAsset: _GotFetAssets.gotLogo,
-      ),
-      _MenuAction(
-        'Generative',
-        'Hasil generative',
-        Icons.local_florist_rounded,
-        _GotFetPage.gotInput,
-        logoAsset: _GotFetAssets.gotLogo,
-      ),
-      _MenuAction(
-        'Review GOT',
-        'Approve result',
-        Icons.verified_rounded,
-        _GotFetPage.gotReview,
-        logoAsset: _GotFetAssets.gotLogo,
-      ),
-    ];
-
-    return _PageScaffold(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _ModuleStrip(
-            logoAsset: _GotFetAssets.gotLogo,
-            title: 'Grow Out Test',
-            subtitle: 'Pilih fitur inspeksi GOT yang akan dikerjakan',
-          ),
-          const SizedBox(height: 18),
-          Text('Fitur GOT', style: _sectionTitle(context)),
-          const SizedBox(height: 10),
-          _buildActionGrid(
-            actions,
-            onAction: (action) {
-              if (action.title == 'Vegetatif') {
-                _setGotObservationStage(_GotObservationStage.vegetative);
-              }
-              if (action.title == 'Generative') {
-                _setGotObservationStage(_GotObservationStage.finalGenerative);
-              }
-              if (action.title == 'Review GOT') {
-                _openReviewModule(0);
-                return;
-              }
-              _openPage(action.page);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFetWorkspacePage() {
-    final actions = [
-      _MenuAction(
-        'Plot Scanner',
-        'Foto plot 10x10',
-        Icons.grid_on_rounded,
-        _GotFetPage.fetPhoto,
-        logoAsset: _GotFetAssets.fetLogo,
-      ),
-      _MenuAction(
-        'Analisa Plot',
-        'Kroscek 10x10',
-        Icons.analytics_rounded,
-        _GotFetPage.fetAnalysis,
-        logoAsset: _GotFetAssets.fetLogo,
-      ),
-      _MenuAction(
-        'Input FET',
-        'Emergence',
-        Icons.edit_note_rounded,
-        _GotFetPage.fetInput,
-        logoAsset: _GotFetAssets.fetLogo,
-      ),
-      _MenuAction(
-        'Review FET',
-        'Approve result',
-        Icons.verified_rounded,
-        _GotFetPage.fetReview,
-        logoAsset: _GotFetAssets.fetLogo,
-      ),
-    ];
-
-    return _PageScaffold(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _ModuleStrip(
-            logoAsset: _GotFetAssets.fetLogo,
-            title: 'Field Emergence Test',
-            subtitle: 'Pilih fitur inspeksi FET yang akan dikerjakan',
-          ),
-          const SizedBox(height: 18),
-          Text('Fitur FET', style: _sectionTitle(context)),
-          const SizedBox(height: 10),
-          _buildActionGrid(
-            actions,
-            onAction: (action) {
-              if (action.title == 'Review FET') {
-                _openReviewModule(1);
-                return;
-              }
-              _openPage(action.page);
-            },
-          ),
-        ],
-      ),
     );
   }
 
@@ -2303,7 +2326,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ? 'Evidence lengkap, hasil siap disubmit/review'
           : _gotInputReady
               ? 'Lengkapi evidence sesuai slot hasil pengamatan'
-              : 'Mulai dari data tanam dan input hasil pengamatan',
+              : 'Mulai dari data tanam, lalu isi fase dan evidence di menu Vegetatif atau Generative',
       steps: [
         _WorkflowStepData(
           label: 'Tanam',
@@ -2313,9 +2336,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
           active: _page == _GotFetPage.gotPlantingData,
         ),
         _WorkflowStepData(
-          label: 'Input',
+          label: _gotObservationStageLabel,
           detail: _gotInputReady ? 'Ada hasil' : 'Belum ada',
-          icon: Icons.edit_note_rounded,
+          icon: _gotStageIcon,
           done: _gotInputReady,
           active: _page == _GotFetPage.gotInput,
         ),
@@ -2326,7 +2349,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
               : '$_gotEvidenceFilledCount/${_gotEvidenceSlots.length}',
           icon: Icons.photo_library_rounded,
           done: _gotEvidenceReady,
-          active: _page == _GotFetPage.gotPhoto,
+          active: _page == _GotFetPage.gotInput,
         ),
         _WorkflowStepData(
           label: 'Review',
@@ -2397,7 +2420,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             logoAsset: _GotFetAssets.gotLogo,
             title: 'Data Tanam GOT',
             subtitle:
-                'Input tanggal tanam, lokasi, area, status sample, dan estimasi hasil',
+                'Khusus input proses tanam sampai data tanam dinyatakan lengkap',
           ),
           const SizedBox(height: 12),
           _buildGotWorkflowCard(),
@@ -2415,14 +2438,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 16),
           _buildManualDatabaseCard(),
           const SizedBox(height: 16),
-          _DualActionBar(
-            leftLabel: 'Foto GOT',
-            rightLabel: 'Input Hasil',
-            leftIcon: Icons.center_focus_strong_rounded,
-            rightIcon: Icons.edit_note_rounded,
-            onLeft: () => _openPage(_GotFetPage.gotPhoto),
-            onRight: () => _openPage(_GotFetPage.gotInput),
-          ),
+          _buildPlantingBoundaryCard(),
         ],
       ),
     );
@@ -2476,10 +2492,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
         children: [
           _buildSamplePicker(module: 'GOT'),
           const SizedBox(height: 12),
-          const _ModuleStrip(
+          _ModuleStrip(
             logoAsset: _GotFetAssets.gotLogo,
-            title: 'Grow Out Test',
-            subtitle: 'Input hasil purity dan evidence tanaman',
+            title: 'Input GOT $_gotObservationStageLabel',
+            subtitle: _gotObservationStage == _GotObservationStage.vegetative
+                ? 'Fase vegetatif: input hasil dan evidence khusus vegetatif'
+                : 'Fase generative: input hasil dan evidence khusus generative',
           ),
           const SizedBox(height: 12),
           _buildGotWorkflowCard(),
@@ -2493,21 +2511,28 @@ class _GotFetScreenState extends State<GotFetScreen> {
             ],
           ),
           const SizedBox(height: 14),
-          _buildGotStageSelector(),
+          _buildGotStageLockBanner(),
           const SizedBox(height: 12),
           _buildGotCountForm(),
           const SizedBox(height: 12),
           _buildGotEvidenceSummaryCard(),
           const SizedBox(height: 12),
+          _buildSmartCameraStatusCard(module: 'GOT'),
+          const SizedBox(height: 12),
+          _buildGotEvidenceFolders(),
+          const SizedBox(height: 12),
           _buildNoteBox(controller: _gotNoteController),
           const SizedBox(height: 16),
           _DualActionBar(
             leftLabel: 'Simpan Draft',
-            rightLabel: 'Submit',
+            rightLabel: 'Submit $_gotObservationStageLabel',
             leftIcon: Icons.save_outlined,
-            rightIcon: Icons.send_rounded,
+            rightIcon: _gotStageIcon,
             rightEnabled: _gotCountsValid && !_isSyncing,
-            onLeft: () => _showSnack('Draft GOT disimpan lokal.'),
+            rightColor: _gotStageAccentColor,
+            onLeft: () => _showSnack(
+              'Draft GOT $_gotObservationStageLabel disimpan lokal.',
+            ),
             onRight: _submitGotResult,
           ),
         ],
@@ -2613,6 +2638,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _buildFetWorkflowCard(),
           const SizedBox(height: 12),
           _buildReplicationSelector(),
+          const SizedBox(height: 14),
+          _buildFetAutoDetectionCard(),
           const SizedBox(height: 14),
           _MetricGrid(
             cards: [
@@ -3158,40 +3185,66 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Gunakan tombol ini untuk mencatat progress pengiriman sample sebelum masuk proses tanam.',
+            'Gunakan tombol ini untuk mencatat progress sample sebelum tanam, termasuk request new sample bila sample tidak bisa diamati.',
             style: AdvantaText.body2.copyWith(
               color: _gotFetMutedColor(context),
             ),
           ),
           const SizedBox(height: 14),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.move_to_inbox_rounded),
-                  label: const Text('Diterima'),
-                  onPressed: _isSyncing
-                      ? null
-                      : () => _confirmTrackingStatus(
-                            'Received',
-                            onConfirmed: onConfirmed,
-                          ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.grass_rounded),
-                  label: const Text('Siap Tanam'),
-                  onPressed: _isSyncing
-                      ? null
-                      : () => _confirmTrackingStatus(
-                            'Ready to Plant',
-                            onConfirmed: onConfirmed,
-                          ),
-                ),
-              ),
-            ],
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 520;
+              final itemWidth = compact
+                  ? constraints.maxWidth
+                  : (constraints.maxWidth - 20) / 3;
+              return Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  SizedBox(
+                    width: itemWidth,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.move_to_inbox_rounded),
+                      label: const Text('Diterima'),
+                      onPressed: _isSyncing
+                          ? null
+                          : () => _confirmTrackingStatus(
+                                'Received',
+                                onConfirmed: onConfirmed,
+                              ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: itemWidth,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.grass_rounded),
+                      label: const Text('Siap Tanam'),
+                      onPressed: _isSyncing
+                          ? null
+                          : () => _confirmTrackingStatus(
+                                'Ready to Plant',
+                                onConfirmed: onConfirmed,
+                              ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: itemWidth,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.change_circle_rounded),
+                      label: const Text('Request Sample'),
+                      onPressed: _isSyncing
+                          ? null
+                          : () => _confirmTrackingStatus(
+                                'Request New Sample',
+                                remarks:
+                                    'Sample tidak bisa diamati, request new sample.',
+                                onConfirmed: onConfirmed,
+                              ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -3398,6 +3451,54 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Widget _buildPlantingBoundaryCard() {
+    final color =
+        _gotPlanningReady ? AdvantaColors.success : AdvantaColors.gold;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Batas Proses Data Tanam',
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: _gotPlanningReady ? 'Lengkap' : 'Belum lengkap',
+                color: color,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Halaman ini hanya menyimpan tanggal tanam, lokasi, field area, status sample, dan estimasi hasil. Submit hasil GOT dilakukan dari menu Vegetatif atau Generative.',
+            style: AdvantaText.body2.copyWith(
+              color: _gotFetMutedColor(context),
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.save_rounded),
+              label: const Text('Simpan Data Tanam'),
+              onPressed: _isSyncing
+                  ? null
+                  : () => _persistSelectedSamplePlanning(showResult: true),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildGotDropdown<T>({
     required String label,
     required T? value,
@@ -3468,6 +3569,36 @@ class _GotFetScreenState extends State<GotFetScreen> {
         onSelectionChanged: (selection) {
           _setGotObservationStage(selection.first);
         },
+      ),
+    );
+  }
+
+  Widget _buildGotStageLockBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+      decoration: BoxDecoration(
+        color: _gotStageAccentColor.withAlpha(
+          _gotFetIsDark(context) ? 54 : 24,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _gotStageAccentColor.withAlpha(120)),
+      ),
+      child: Row(
+        children: [
+          Icon(_gotStageIcon, color: _gotStageAccentColor, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Fase terkunci: $_gotObservationStageLabel. Untuk fase lain, kembali ke menu GOT lalu pilih Vegetatif atau Generative.',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: AdvantaText.bodyBold.copyWith(
+                color: _gotFetTextColor(context),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3694,10 +3825,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
             ),
           ),
           const SizedBox(width: 10),
-          IconButton.filledTonal(
-            tooltip: 'Buka Foto GOT',
-            onPressed: () => _openPage(_GotFetPage.gotPhoto),
-            icon: const Icon(Icons.arrow_forward_rounded),
+          _StatusPill(
+            label: _gotObservationStageLabel,
+            color: _gotStageAccentColor,
           ),
         ],
       ),
@@ -3893,7 +4023,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Jumlah ${category.title}: $count | $filledCount/${slots.length} foto',
+                      'Jumlah ${category.title}: $count | $filledCount/${slots.length} foto evidence (maks $_gotMaxEvidenceSlotsPerCategory)',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: AdvantaText.caption.copyWith(
@@ -3972,12 +4102,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   int _gotEvidenceSlotCountForCategory(_GotEvidenceCategory category) {
-    return switch (category) {
-      _GotEvidenceCategory.trueType => _gotTrueType > 0 ? 1 : 0,
-      _GotEvidenceCategory.offType => _gotOffType,
-      _GotEvidenceCategory.selfing => _gotSelfing,
-      _GotEvidenceCategory.male => _gotMale,
-    };
+    final count = _gotEvidenceCountForCategory(category);
+    if (count <= 0) return 0;
+    return math.min(count, _gotMaxEvidenceSlotsPerCategory);
   }
 
   int _gotEvidenceCountForCategory(_GotEvidenceCategory category) {
@@ -4108,6 +4235,140 @@ class _GotFetScreenState extends State<GotFetScreen> {
                   emergence: _fetEmergenceForReplication(replication),
                 ),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFetAutoDetectionCard() {
+    final result = _fetAutoDetectionByReplication[_selectedReplication];
+    final hasPhoto = _currentFetPlotPhoto != null;
+    final isAnalyzing = _analyzingFetReplication == _selectedReplication;
+    final statusColor = isAnalyzing
+        ? AdvantaColors.warning
+        : result == null
+            ? hasPhoto
+                ? AdvantaColors.gold
+                : AdvantaColors.mutedGrey
+            : result.reviewCount == 0
+                ? AdvantaColors.success
+                : AdvantaColors.gold;
+    final statusLabel = isAnalyzing
+        ? 'Analisa'
+        : result == null
+            ? hasPhoto
+                ? 'Siap'
+                : 'Belum foto'
+            : result.reviewCount == 0
+                ? 'Prefill OK'
+                : 'Perlu Review';
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: statusColor.withAlpha(
+                    _gotFetIsDark(context) ? 46 : 24,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.auto_awesome_rounded, color: statusColor),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Standarisasi & Auto Detect',
+                      style: AdvantaText.bodyBold.copyWith(
+                        color: _gotFetTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      result == null
+                          ? hasPhoto
+                              ? 'Foto bisa dianalisa ulang ke crop 1:1 standar dan prefill hijau daun.'
+                              : 'Ambil foto plot agar grid 10 x 10 bisa distandarkan.'
+                          : 'Foto ${result.sourceWidth}x${result.sourceHeight} dinormalisasi ke ${result.standardizedSize}x${result.standardizedSize}.',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              _StatusPill(label: statusLabel, color: statusColor),
+            ],
+          ),
+          if (result != null) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _StatusPill(
+                  label: '${result.grownCount} tumbuh',
+                  color: AdvantaColors.success,
+                ),
+                _StatusPill(
+                  label: '${result.notGrownCount} tidak tumbuh',
+                  color: AdvantaColors.error,
+                ),
+                _StatusPill(
+                  label: '${result.reviewCount} review',
+                  color: result.reviewCount == 0
+                      ? AdvantaColors.success
+                      : AdvantaColors.gold,
+                ),
+                _StatusPill(
+                  label:
+                      '${result.confidencePercent.toStringAsFixed(0)}% yakin',
+                  color: statusColor,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            _InfoRow(
+              label: 'Crop standar',
+              value:
+                  '${result.cropSize} px dari (${result.cropLeft}, ${result.cropTop})',
+            ),
+            const SizedBox(height: 8),
+            _InfoRow(
+              label: 'Metode deteksi',
+              value: 'Hijau daun HSV/ExG per cell 10 x 10',
+            ),
+          ],
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: isAnalyzing
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.auto_fix_high_rounded),
+              label: Text(
+                  isAnalyzing ? 'Menganalisa foto...' : 'Analisa Ulang Foto'),
+              onPressed: !hasPhoto || isAnalyzing
+                  ? null
+                  : () => _runFetAutoDetectionForCurrentPhoto(showResult: true),
+            ),
           ),
         ],
       ),
@@ -4816,6 +5077,220 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Future<void> _runFetAutoDetectionForCurrentPhoto({
+    bool showResult = false,
+  }) async {
+    final file = _currentFetPlotPhoto;
+    if (file == null || _analyzingFetReplication != null) return;
+    final replication = _selectedReplication;
+
+    setState(() => _analyzingFetReplication = replication);
+    try {
+      final result = await _standardizeAndAnalyzeFetPlotPhoto(file);
+      if (!mounted) return;
+      setState(() {
+        _fetPlotPhotosByReplication[replication] = result.standardizedFile;
+        _fetAutoDetectionByReplication[replication] = result;
+        _replaceFetPoints(replication, result.pointStatuses);
+        if (_analyzingFetReplication == replication) {
+          _analyzingFetReplication = null;
+        }
+      });
+      if (showResult) _showFetAutoDetectionSnack(result);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        if (_analyzingFetReplication == replication) {
+          _analyzingFetReplication = null;
+        }
+      });
+      if (showResult) {
+        _showSnack('Auto detect FET gagal: ${_friendlyError(error)}');
+      }
+    }
+  }
+
+  void _replaceFetPoints(int replication, List<_FetPointStatus> points) {
+    final target = replication == 1 ? _replicationOne : _replicationTwo;
+    target
+      ..clear()
+      ..addAll(points);
+  }
+
+  void _showFetAutoDetectionSnack(_FetAutoDetectionResult result) {
+    _showSnack(
+      'Auto detect FET: ${result.grownCount} tumbuh, '
+      '${result.notGrownCount} tidak tumbuh, '
+      '${result.reviewCount} perlu review.',
+    );
+  }
+
+  Future<_FetAutoDetectionResult> _standardizeAndAnalyzeFetPlotPhoto(
+    File sourceFile,
+  ) async {
+    final bytes = await sourceFile.readAsBytes();
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final sourceImage = frame.image;
+    ui.Image? standardizedImage;
+
+    try {
+      final sourceWidth = sourceImage.width;
+      final sourceHeight = sourceImage.height;
+      final cropSize = math.min(sourceWidth, sourceHeight);
+      final cropLeft = ((sourceWidth - cropSize) / 2).round();
+      final cropTop = ((sourceHeight - cropSize) / 2).round();
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      final sourceRect = Rect.fromLTWH(
+        cropLeft.toDouble(),
+        cropTop.toDouble(),
+        cropSize.toDouble(),
+        cropSize.toDouble(),
+      );
+      final targetRect = Rect.fromLTWH(
+        0,
+        0,
+        _fetStandardImageSize.toDouble(),
+        _fetStandardImageSize.toDouble(),
+      );
+      final paint = Paint()..filterQuality = FilterQuality.high;
+      canvas.drawImageRect(sourceImage, sourceRect, targetRect, paint);
+      final picture = recorder.endRecording();
+      try {
+        standardizedImage = await picture.toImage(
+          _fetStandardImageSize,
+          _fetStandardImageSize,
+        );
+      } finally {
+        picture.dispose();
+      }
+
+      final pngBytes = await standardizedImage.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+      if (pngBytes == null) {
+        throw const GotFetStorageException(
+          'Gagal membuat foto standar FET.',
+        );
+      }
+      final standardizedFile = await _writeFetStandardizedPhoto(
+        sourceFile,
+        pngBytes.buffer.asUint8List(),
+      );
+      final rawBytes = await standardizedImage.toByteData(
+        format: ui.ImageByteFormat.rawRgba,
+      );
+      if (rawBytes == null) {
+        throw const GotFetStorageException(
+          'Gagal membaca pixel foto standar FET.',
+        );
+      }
+      final detection = _detectFetPointStatuses(rawBytes);
+
+      return _FetAutoDetectionResult(
+        standardizedFile: standardizedFile,
+        pointStatuses: detection.statuses,
+        greenRatios: detection.greenRatios,
+        sourceWidth: sourceWidth,
+        sourceHeight: sourceHeight,
+        cropLeft: cropLeft,
+        cropTop: cropTop,
+        cropSize: cropSize,
+        standardizedSize: _fetStandardImageSize,
+        analyzedAt: DateTime.now(),
+      );
+    } finally {
+      standardizedImage?.dispose();
+      sourceImage.dispose();
+      codec.dispose();
+    }
+  }
+
+  Future<File> _writeFetStandardizedPhoto(
+    File sourceFile,
+    List<int> pngBytes,
+  ) async {
+    final name = sourceFile.uri.pathSegments.isEmpty
+        ? 'fet_plot'
+        : sourceFile.uri.pathSegments.last;
+    final dotIndex = name.lastIndexOf('.');
+    var stem = dotIndex <= 0 ? name : name.substring(0, dotIndex);
+    if (stem.endsWith('_std')) {
+      stem = stem.substring(0, stem.length - 4);
+    }
+    final target = File(
+      '${sourceFile.parent.path}${Platform.pathSeparator}${stem}_std.png',
+    );
+    await target.writeAsBytes(pngBytes, flush: true);
+    return target;
+  }
+
+  ({List<_FetPointStatus> statuses, List<double> greenRatios})
+      _detectFetPointStatuses(ByteData rawBytes) {
+    final statuses = <_FetPointStatus>[];
+    final greenRatios = <double>[];
+    final cellSize = _fetStandardImageSize / _fetGridColumns;
+
+    for (var row = 0; row < _fetGridRows; row++) {
+      for (var col = 0; col < _fetGridColumns; col++) {
+        final ratio = _greenPixelRatioForCell(rawBytes, row, col, cellSize);
+        greenRatios.add(ratio);
+        if (ratio >= _fetGreenHighThreshold) {
+          statuses.add(_FetPointStatus.grown);
+        } else if (ratio <= _fetGreenLowThreshold) {
+          statuses.add(_FetPointStatus.notGrown);
+        } else {
+          statuses.add(_FetPointStatus.review);
+        }
+      }
+    }
+
+    return (statuses: statuses, greenRatios: greenRatios);
+  }
+
+  double _greenPixelRatioForCell(
+    ByteData rawBytes,
+    int row,
+    int col,
+    double cellSize,
+  ) {
+    final left = (col * cellSize + cellSize * .18).round();
+    final right = ((col + 1) * cellSize - cellSize * .18).round();
+    final top = (row * cellSize + cellSize * .18).round();
+    final bottom = ((row + 1) * cellSize - cellSize * .18).round();
+    final step = math.max(2, (cellSize / 22).floor());
+    var greenPixels = 0;
+    var totalPixels = 0;
+
+    for (var y = top; y < bottom; y += step) {
+      for (var x = left; x < right; x += step) {
+        final offset = (y * _fetStandardImageSize + x) * 4;
+        final r = rawBytes.getUint8(offset);
+        final g = rawBytes.getUint8(offset + 1);
+        final b = rawBytes.getUint8(offset + 2);
+        totalPixels++;
+        if (_isFetLeafGreen(r, g, b)) greenPixels++;
+      }
+    }
+
+    if (totalPixels == 0) return 0;
+    return greenPixels / totalPixels;
+  }
+
+  bool _isFetLeafGreen(int r, int g, int b) {
+    final sum = r + g + b + 1;
+    final exg = 2 * g - r - b;
+    final normalizedExg = exg / sum;
+    final greenDominance = g - math.max(r, b);
+    final brightness = sum / 3;
+    final leafGreen =
+        brightness > 35 && g > 45 && greenDominance > 8 && normalizedExg > .07;
+    final lightLeafGreen =
+        brightness > 75 && g > r * 1.03 && g > b * 1.05 && exg > 18;
+    return leafGreen || lightLeafGreen;
+  }
+
   Future<void> _pickFetPlotPhoto(
     ImageSource source, {
     bool openAnalysisAfterPick = false,
@@ -4847,16 +5322,48 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ),
       );
       if (!mounted) return;
+      final replication = _selectedReplication;
       setState(() {
-        _fetPlotPhotosByReplication[_selectedReplication] = prepared.file;
-        _fetPlotMetadataByReplication[_selectedReplication] = prepared.metadata;
+        _fetPlotPhotosByReplication[replication] = prepared.file;
+        _fetPlotMetadataByReplication[replication] = prepared.metadata;
+        _fetAutoDetectionByReplication.remove(replication);
+        _replaceFetPoints(replication, _initialFetPoints());
+        _analyzingFetReplication = replication;
       });
+
+      _FetAutoDetectionResult? detectionResult;
+      Object? detectionError;
+      try {
+        detectionResult = await _standardizeAndAnalyzeFetPlotPhoto(
+          prepared.file,
+        );
+      } catch (error) {
+        detectionError = error;
+      }
+      if (!mounted) return;
+      setState(() {
+        if (detectionResult != null) {
+          _fetPlotPhotosByReplication[replication] =
+              detectionResult.standardizedFile;
+          _fetAutoDetectionByReplication[replication] = detectionResult;
+          _replaceFetPoints(replication, detectionResult.pointStatuses);
+        }
+        if (_analyzingFetReplication == replication) {
+          _analyzingFetReplication = null;
+        }
+      });
+
       final reviewText = prepared.metadata.needsReview
           ? ' Cek lagi: ${prepared.metadata.warnings.join(', ')}.'
           : '';
       final duplicateText =
           prepared.duplicateLikely ? ' Potensi duplikat.' : '';
-      _showSnack('Foto plot FET siap dianalisis.$reviewText$duplicateText');
+      final detectionText = detectionResult == null
+          ? ' Auto detect belum berhasil${detectionError == null ? '.' : ': ${_friendlyError(detectionError)}.'}'
+          : ' Auto detect: ${detectionResult.grownCount} tumbuh, ${detectionResult.reviewCount} review.';
+      _showSnack(
+        'Foto plot FET siap dianalisis.$detectionText$reviewText$duplicateText',
+      );
       if (openAnalysisAfterPick) {
         _openPage(_GotFetPage.fetAnalysis);
       }
@@ -4911,7 +5418,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     await _persistSelectedSamplePlanning();
   }
 
-  Future<void> _persistSelectedSamplePlanning() async {
+  Future<void> _persistSelectedSamplePlanning({bool showResult = false}) async {
     final sample = _selectedSample;
     try {
       await _gotFetService.updateSamplePlanning(
@@ -4925,6 +5432,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
         fieldArea: sample.fieldArea,
         statusSample: sample.statusSample,
       );
+      if (showResult && mounted) {
+        _showSnack('Data tanam ${sample.batch} tersimpan.');
+      }
     } catch (error) {
       if (!mounted) return;
       _showSnack('Gagal update data Batch: ${_friendlyError(error)}');
@@ -4937,8 +5447,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
       return;
     }
 
+    final submittedStatus = _gotSubmittedStatusLabel;
+
     await _runBackendAction(
-      successMessage: 'GOT result ${_selectedSample.lotId} submitted.',
+      successMessage:
+          'GOT $_gotObservationStageLabel ${_selectedSample.lotId} submitted.',
       action: () async {
         await _gotFetService.submitGotObservation(
           lotId: _selectedSample.lotId,
@@ -4962,12 +5475,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
         );
         await _gotFetService.updateSampleStatus(
           batch: _selectedSample.batch,
-          status: 'Submitted',
+          status: submittedStatus,
         );
         if (!mounted) return;
         setState(() {
-          _selectedSample.status = 'Submitted';
-          _selectedSample.statusSample = 'Submitted';
+          _selectedSample.status = submittedStatus;
+          _selectedSample.statusSample = submittedStatus;
         });
       },
     );
@@ -5056,6 +5569,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   Future<void> _confirmTrackingStatus(
     String status, {
+    String? remarks,
     VoidCallback? onConfirmed,
   }) async {
     final sample = _selectedSample;
@@ -5067,7 +5581,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
           lotId: sample.lotId,
           status: status,
           actor: _actorName,
-          remarks: 'Lot tracking confirmation for ${sample.batch}',
+          remarks: remarks ?? 'Lot tracking confirmation for ${sample.batch}',
+        );
+        await _gotFetService.updateSampleStatus(
+          batch: sample.batch,
+          status: status,
         );
         if (!mounted) return;
         setState(() {
@@ -5307,6 +5825,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
   Color _statusColor(String status) {
     final normalized = status.toLowerCase();
     if (normalized.contains('approved')) return AdvantaColors.success;
+    if (normalized.contains('request new sample') ||
+        normalized.contains('resample') ||
+        normalized.contains('resampling')) {
+      return AdvantaColors.error;
+    }
+    if (normalized.contains('generative') || normalized.contains('generatif')) {
+      return const Color(0xFF4361EE);
+    }
+    if (normalized.contains('vegetative') || normalized.contains('vegetatif')) {
+      return AdvantaColors.primaryGreen;
+    }
     if (normalized.contains('hold') || normalized.contains('revision')) {
       return AdvantaColors.gold;
     }
@@ -5405,6 +5934,14 @@ class _GotFetScreenState extends State<GotFetScreen> {
       location: _readText(row, const ['location', 'Location']),
       fieldArea: _readDouble(row, const ['field_area', 'Field Area']),
       statusGot2: _readText(row, const ['status_got_2', 'Status GOT 2']),
+      statusGotVeg: _readText(
+        row,
+        const ['status_got_veg', 'Status GOT Veg'],
+      ),
+      finalStatusGot: _readText(
+        row,
+        const ['final_status_got', 'Final Status GOT'],
+      ),
       statusSample: _readText(
         row,
         const ['status_sample', 'Status Sample'],
@@ -7128,6 +7665,7 @@ class _DualActionBar extends StatelessWidget {
   final IconData leftIcon;
   final IconData rightIcon;
   final bool rightEnabled;
+  final Color? rightColor;
   final VoidCallback onLeft;
   final VoidCallback onRight;
 
@@ -7139,6 +7677,7 @@ class _DualActionBar extends StatelessWidget {
     required this.onLeft,
     required this.onRight,
     this.rightEnabled = true,
+    this.rightColor,
   });
 
   @override
@@ -7156,7 +7695,7 @@ class _DualActionBar extends StatelessWidget {
         Expanded(
           child: ElevatedButton.icon(
             style: ElevatedButton.styleFrom(
-              backgroundColor: _GotFetUi.green,
+              backgroundColor: rightColor ?? _GotFetUi.green,
               foregroundColor: Colors.white,
               disabledBackgroundColor: _GotFetUi.line,
               disabledForegroundColor: _GotFetUi.navy.withAlpha(95),
@@ -7203,7 +7742,7 @@ class _GotEvidenceEmptyFolder extends StatelessWidget {
             child: Text(
               count == 0
                   ? 'Belum ada temuan ${category.title} untuk stage ini.'
-                  : 'Slot foto akan muncul setelah jumlah ${category.title} terbaca.',
+                  : 'Slot foto akan muncul setelah jumlah ${category.title} terbaca, maksimal 6 foto per kategori.',
               style: AdvantaText.caption.copyWith(
                 color: _gotFetMutedColor(context),
                 fontWeight: FontWeight.w800,
