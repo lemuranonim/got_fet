@@ -1083,11 +1083,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     setState(() {
       _latestFetObservation = result;
       if (result != null && result.pointStatuses.length == _fetGridPointCount) {
-        final target =
-            result.replication == 1 ? _replicationOne : _replicationTwo;
-        target
-          ..clear()
-          ..addAll(result.pointStatuses);
+        _replaceFetPoints(result.replication, result.pointStatuses);
       }
     });
   }
@@ -5111,10 +5107,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   void _replaceFetPoints(int replication, List<_FetPointStatus> points) {
-    final target = replication == 1 ? _replicationOne : _replicationTwo;
-    target
-      ..clear()
-      ..addAll(points);
+    final normalized = _initialFetPoints();
+    final copyLength = math.min(points.length, _fetGridPointCount);
+    for (var index = 0; index < copyLength; index++) {
+      normalized[index] = points[index];
+    }
+    if (replication == 1) {
+      _replicationOne = normalized;
+    } else {
+      _replicationTwo = normalized;
+    }
   }
 
   void _showFetAutoDetectionSnack(_FetAutoDetectionResult result) {
@@ -6070,6 +6072,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return List<_FetPointStatus>.filled(
       _fetGridPointCount,
       _FetPointStatus.review,
+      growable: true,
     );
   }
 }
