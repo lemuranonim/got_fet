@@ -515,8 +515,7 @@ class _StandaloneCameraTemplatePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final frameColor =
         ready ? AdvantaColors.success : Colors.white.withAlpha(230);
-    final contentRect = Rect.fromLTWH(8, 8, size.width - 16, size.height - 16);
-    final rect = showGrid ? _squareRectInside(contentRect) : contentRect;
+    final rect = Rect.fromLTWH(8, 8, size.width - 16, size.height - 16);
     final linePaint = Paint()
       ..color = frameColor
       ..strokeWidth = ready ? 4 : 3
@@ -583,11 +582,6 @@ class _StandaloneCameraTemplatePainter extends CustomPainter {
     return showCenter != oldDelegate.showCenter ||
         showGrid != oldDelegate.showGrid ||
         ready != oldDelegate.ready;
-  }
-
-  Rect _squareRectInside(Rect rect) {
-    final side = math.min(rect.width, rect.height);
-    return Rect.fromCenter(center: rect.center, width: side, height: side);
   }
 }
 

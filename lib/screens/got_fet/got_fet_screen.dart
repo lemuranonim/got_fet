@@ -101,7 +101,6 @@ enum _InspectionModule { got, fet }
 const _fetGridColumns = 10;
 const _fetGridRows = 10;
 const _fetGridPointCount = _fetGridColumns * _fetGridRows;
-const _fetStandardImageSize = 1200;
 const _fetGreenHighThreshold = 0.035;
 const _fetGreenLowThreshold = 0.012;
 
@@ -355,6 +354,18 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   _SmartPhotoMetadata? get _currentFetPlotPhotoMetadata =>
       _fetPlotMetadataByReplication[_selectedReplication];
+
+  double _currentFetPhotoAspectRatio() {
+    final result = _fetAutoDetectionByReplication[_selectedReplication];
+    if (result != null && result.sourceWidth > 0 && result.sourceHeight > 0) {
+      return result.sourceWidth / result.sourceHeight;
+    }
+    final metadata = _currentFetPlotPhotoMetadata;
+    if (metadata != null && metadata.width > 0 && metadata.height > 0) {
+      return metadata.width / metadata.height;
+    }
+    return 1;
+  }
 
   int get _gotConfirmedIssueCount => _gotOffType + _gotSelfing + _gotMale;
 
@@ -4283,7 +4294,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Standarisasi & Auto Detect',
+                      'Auto Detect Foto Asli',
                       style: AdvantaText.bodyBold.copyWith(
                         color: _gotFetTextColor(context),
                       ),
@@ -4292,9 +4303,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
                     Text(
                       result == null
                           ? hasPhoto
-                              ? 'Foto bisa dianalisa ulang ke crop 1:1 standar dan prefill hijau daun.'
-                              : 'Ambil foto plot agar grid 10 x 10 bisa distandarkan.'
-                          : 'Foto ${result.sourceWidth}x${result.sourceHeight} dinormalisasi ke ${result.standardizedSize}x${result.standardizedSize}.',
+                              ? 'Foto asli akan dibagi langsung menjadi grid 10 x 10.'
+                              : 'Ambil foto plot agar grid 10 x 10 bisa dianalisa.'
+                          : 'Foto asli ${result.sourceWidth}x${result.sourceHeight} dianalisa langsung.',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: AdvantaText.caption.copyWith(
@@ -4338,9 +4349,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
             ),
             const SizedBox(height: 10),
             _InfoRow(
-              label: 'Crop standar',
-              value:
-                  '${result.cropSize} px dari (${result.cropLeft}, ${result.cropTop})',
+              label: 'Grid analisis',
+              value: '10 x 10 mengikuti dimensi foto asli',
             ),
             const SizedBox(height: 8),
             _InfoRow(
@@ -4373,6 +4383,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   Widget _buildFetPhotoReviewCard() {
     final plotPhoto = _currentFetPlotPhoto;
+    final photoAspectRatio = _currentFetPhotoAspectRatio();
     final hasPhoto = plotPhoto != null;
 
     return _PanelCard(
@@ -4408,6 +4419,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           if (hasPhoto)
             _FetPhotoReviewBoard(
               file: plotPhoto,
+              aspectRatio: photoAspectRatio,
               points: _currentReplication,
               statusColor: _fetStatusColor,
               statusLabel: _fetStatusShortLabel,
@@ -4640,6 +4652,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ? result!.pointStatuses
         : _currentReplication;
     final localPhoto = _currentFetPlotPhoto;
+    final photoAspectRatio = _currentFetPhotoAspectRatio();
     final photoUrl = result?.plotPhotoUrl;
     final hasVisual = localPhoto != null || (photoUrl?.isNotEmpty ?? false);
 
@@ -4676,6 +4689,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             _FetReviewPhotoBoard(
               file: localPhoto,
               photoUrl: photoUrl,
+              aspectRatio: photoAspectRatio,
               points: points,
               statusColor: _fetStatusColor,
               statusLabel: _fetStatusShortLabel,
@@ -5082,10 +5096,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
     setState(() => _analyzingFetReplication = replication);
     try {
-      final result = await _standardizeAndAnalyzeFetPlotPhoto(file);
+      final result = await _analyzeFetPlotPhoto(file);
       if (!mounted) return;
       setState(() {
-        _fetPlotPhotosByReplication[replication] = result.standardizedFile;
         _fetAutoDetectionByReplication[replication] = result;
         _replaceFetPoints(replication, result.pointStatuses);
         if (_analyzingFetReplication == replication) {
@@ -5127,116 +5140,66 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
-  Future<_FetAutoDetectionResult> _standardizeAndAnalyzeFetPlotPhoto(
+  Future<_FetAutoDetectionResult> _analyzeFetPlotPhoto(
     File sourceFile,
   ) async {
     final bytes = await sourceFile.readAsBytes();
     final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
     final sourceImage = frame.image;
-    ui.Image? standardizedImage;
 
     try {
       final sourceWidth = sourceImage.width;
       final sourceHeight = sourceImage.height;
-      final cropSize = math.min(sourceWidth, sourceHeight);
-      final cropLeft = ((sourceWidth - cropSize) / 2).round();
-      final cropTop = ((sourceHeight - cropSize) / 2).round();
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(recorder);
-      final sourceRect = Rect.fromLTWH(
-        cropLeft.toDouble(),
-        cropTop.toDouble(),
-        cropSize.toDouble(),
-        cropSize.toDouble(),
-      );
-      final targetRect = Rect.fromLTWH(
-        0,
-        0,
-        _fetStandardImageSize.toDouble(),
-        _fetStandardImageSize.toDouble(),
-      );
-      final paint = Paint()..filterQuality = FilterQuality.high;
-      canvas.drawImageRect(sourceImage, sourceRect, targetRect, paint);
-      final picture = recorder.endRecording();
-      try {
-        standardizedImage = await picture.toImage(
-          _fetStandardImageSize,
-          _fetStandardImageSize,
-        );
-      } finally {
-        picture.dispose();
-      }
-
-      final pngBytes = await standardizedImage.toByteData(
-        format: ui.ImageByteFormat.png,
-      );
-      if (pngBytes == null) {
-        throw const GotFetStorageException(
-          'Gagal membuat foto standar FET.',
-        );
-      }
-      final standardizedFile = await _writeFetStandardizedPhoto(
-        sourceFile,
-        pngBytes.buffer.asUint8List(),
-      );
-      final rawBytes = await standardizedImage.toByteData(
+      final rawBytes = await sourceImage.toByteData(
         format: ui.ImageByteFormat.rawRgba,
       );
       if (rawBytes == null) {
         throw const GotFetStorageException(
-          'Gagal membaca pixel foto standar FET.',
+          'Gagal membaca pixel foto FET.',
         );
       }
-      final detection = _detectFetPointStatuses(rawBytes);
+      final detection = _detectFetPointStatuses(
+        rawBytes,
+        imageWidth: sourceWidth,
+        imageHeight: sourceHeight,
+      );
 
       return _FetAutoDetectionResult(
-        standardizedFile: standardizedFile,
         pointStatuses: detection.statuses,
         greenRatios: detection.greenRatios,
         sourceWidth: sourceWidth,
         sourceHeight: sourceHeight,
-        cropLeft: cropLeft,
-        cropTop: cropTop,
-        cropSize: cropSize,
-        standardizedSize: _fetStandardImageSize,
         analyzedAt: DateTime.now(),
       );
     } finally {
-      standardizedImage?.dispose();
       sourceImage.dispose();
       codec.dispose();
     }
   }
 
-  Future<File> _writeFetStandardizedPhoto(
-    File sourceFile,
-    List<int> pngBytes,
-  ) async {
-    final name = sourceFile.uri.pathSegments.isEmpty
-        ? 'fet_plot'
-        : sourceFile.uri.pathSegments.last;
-    final dotIndex = name.lastIndexOf('.');
-    var stem = dotIndex <= 0 ? name : name.substring(0, dotIndex);
-    if (stem.endsWith('_std')) {
-      stem = stem.substring(0, stem.length - 4);
-    }
-    final target = File(
-      '${sourceFile.parent.path}${Platform.pathSeparator}${stem}_std.png',
-    );
-    await target.writeAsBytes(pngBytes, flush: true);
-    return target;
-  }
-
   ({List<_FetPointStatus> statuses, List<double> greenRatios})
-      _detectFetPointStatuses(ByteData rawBytes) {
+      _detectFetPointStatuses(
+    ByteData rawBytes, {
+    required int imageWidth,
+    required int imageHeight,
+  }) {
     final statuses = <_FetPointStatus>[];
     final greenRatios = <double>[];
-    final cellSize = _fetStandardImageSize / _fetGridColumns;
+    final cellWidth = imageWidth / _fetGridColumns;
+    final cellHeight = imageHeight / _fetGridRows;
 
     for (var row = 0; row < _fetGridRows; row++) {
       for (var col = 0; col < _fetGridColumns; col++) {
-        final ratio = _greenPixelRatioForCell(rawBytes, row, col, cellSize);
+        final ratio = _greenPixelRatioForCell(
+          rawBytes,
+          row,
+          col,
+          cellWidth: cellWidth,
+          cellHeight: cellHeight,
+          imageWidth: imageWidth,
+          imageHeight: imageHeight,
+        );
         greenRatios.add(ratio);
         if (ratio >= _fetGreenHighThreshold) {
           statuses.add(_FetPointStatus.grown);
@@ -5254,20 +5217,35 @@ class _GotFetScreenState extends State<GotFetScreen> {
   double _greenPixelRatioForCell(
     ByteData rawBytes,
     int row,
-    int col,
-    double cellSize,
-  ) {
-    final left = (col * cellSize + cellSize * .18).round();
-    final right = ((col + 1) * cellSize - cellSize * .18).round();
-    final top = (row * cellSize + cellSize * .18).round();
-    final bottom = ((row + 1) * cellSize - cellSize * .18).round();
-    final step = math.max(2, (cellSize / 22).floor());
+    int col, {
+    required double cellWidth,
+    required double cellHeight,
+    required int imageWidth,
+    required int imageHeight,
+  }) {
+    final left = (col * cellWidth + cellWidth * .18)
+        .round()
+        .clamp(0, imageWidth - 1)
+        .toInt();
+    final right = ((col + 1) * cellWidth - cellWidth * .18)
+        .round()
+        .clamp(left + 1, imageWidth)
+        .toInt();
+    final top = (row * cellHeight + cellHeight * .18)
+        .round()
+        .clamp(0, imageHeight - 1)
+        .toInt();
+    final bottom = ((row + 1) * cellHeight - cellHeight * .18)
+        .round()
+        .clamp(top + 1, imageHeight)
+        .toInt();
+    final step = math.max(2, (math.min(cellWidth, cellHeight) / 22).floor());
     var greenPixels = 0;
     var totalPixels = 0;
 
     for (var y = top; y < bottom; y += step) {
       for (var x = left; x < right; x += step) {
-        final offset = (y * _fetStandardImageSize + x) * 4;
+        final offset = (y * imageWidth + x) * 4;
         final r = rawBytes.getUint8(offset);
         final g = rawBytes.getUint8(offset + 1);
         final b = rawBytes.getUint8(offset + 2);
@@ -5336,7 +5314,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       _FetAutoDetectionResult? detectionResult;
       Object? detectionError;
       try {
-        detectionResult = await _standardizeAndAnalyzeFetPlotPhoto(
+        detectionResult = await _analyzeFetPlotPhoto(
           prepared.file,
         );
       } catch (error) {
@@ -5345,8 +5323,6 @@ class _GotFetScreenState extends State<GotFetScreen> {
       if (!mounted) return;
       setState(() {
         if (detectionResult != null) {
-          _fetPlotPhotosByReplication[replication] =
-              detectionResult.standardizedFile;
           _fetAutoDetectionByReplication[replication] = detectionResult;
           _replaceFetPoints(replication, detectionResult.pointStatuses);
         }
@@ -7925,13 +7901,17 @@ class _PlotPhotoPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(10),
-      child: Image.file(file, fit: BoxFit.cover),
+      child: ColoredBox(
+        color: Colors.black,
+        child: Image.file(file, fit: BoxFit.contain),
+      ),
     );
   }
 }
 
 class _FetPhotoReviewBoard extends StatelessWidget {
   final File file;
+  final double aspectRatio;
   final List<_FetPointStatus> points;
   final Color Function(_FetPointStatus status) statusColor;
   final String Function(_FetPointStatus status) statusLabel;
@@ -7940,6 +7920,7 @@ class _FetPhotoReviewBoard extends StatelessWidget {
 
   const _FetPhotoReviewBoard({
     required this.file,
+    required this.aspectRatio,
     required this.points,
     required this.statusColor,
     required this.statusLabel,
@@ -7952,7 +7933,7 @@ class _FetPhotoReviewBoard extends StatelessWidget {
     final isDark = _gotFetIsDark(context);
 
     return AspectRatio(
-      aspectRatio: 1,
+      aspectRatio: aspectRatio,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: ColoredBox(
@@ -7966,7 +7947,7 @@ class _FetPhotoReviewBoard extends StatelessWidget {
               children: [
                 Image.file(
                   file,
-                  fit: BoxFit.cover,
+                  fit: BoxFit.contain,
                   errorBuilder: (_, __, ___) => const _PlotPreview(),
                 ),
                 DecoratedBox(
@@ -7982,8 +7963,9 @@ class _FetPhotoReviewBoard extends StatelessWidget {
                 GridView.builder(
                   physics: const NeverScrollableScrollPhysics(),
                   padding: EdgeInsets.zero,
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: _fetGridColumns,
+                    childAspectRatio: aspectRatio,
                   ),
                   itemCount: points.length,
                   itemBuilder: (context, index) {
@@ -8015,6 +7997,7 @@ class _FetPhotoReviewBoard extends StatelessWidget {
 class _FetReviewPhotoBoard extends StatelessWidget {
   final File? file;
   final String? photoUrl;
+  final double aspectRatio;
   final List<_FetPointStatus> points;
   final Color Function(_FetPointStatus status) statusColor;
   final String Function(_FetPointStatus status) statusLabel;
@@ -8022,6 +8005,7 @@ class _FetReviewPhotoBoard extends StatelessWidget {
   const _FetReviewPhotoBoard({
     required this.file,
     required this.photoUrl,
+    required this.aspectRatio,
     required this.points,
     required this.statusColor,
     required this.statusLabel,
@@ -8030,7 +8014,7 @@ class _FetReviewPhotoBoard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AspectRatio(
-      aspectRatio: 1,
+      aspectRatio: aspectRatio,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
         child: ColoredBox(
@@ -8045,13 +8029,13 @@ class _FetReviewPhotoBoard extends StatelessWidget {
                 if (file != null)
                   Image.file(
                     file!,
-                    fit: BoxFit.cover,
+                    fit: BoxFit.contain,
                     errorBuilder: (_, __, ___) => const _PlotPreview(),
                   )
                 else
                   Image.network(
                     photoUrl ?? '',
-                    fit: BoxFit.cover,
+                    fit: BoxFit.contain,
                     errorBuilder: (_, __, ___) => const _PlotPreview(),
                   ),
                 DecoratedBox(
@@ -8067,8 +8051,9 @@ class _FetReviewPhotoBoard extends StatelessWidget {
                 GridView.builder(
                   physics: const NeverScrollableScrollPhysics(),
                   padding: EdgeInsets.zero,
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: _fetGridColumns,
+                    childAspectRatio: aspectRatio,
                   ),
                   itemCount: points.length,
                   itemBuilder: (context, index) {

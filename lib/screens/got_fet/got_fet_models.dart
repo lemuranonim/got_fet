@@ -286,27 +286,17 @@ class _FetObservationResult {
 }
 
 class _FetAutoDetectionResult {
-  final File standardizedFile;
   final List<_FetPointStatus> pointStatuses;
   final List<double> greenRatios;
   final int sourceWidth;
   final int sourceHeight;
-  final int cropLeft;
-  final int cropTop;
-  final int cropSize;
-  final int standardizedSize;
   final DateTime analyzedAt;
 
   const _FetAutoDetectionResult({
-    required this.standardizedFile,
     required this.pointStatuses,
     required this.greenRatios,
     required this.sourceWidth,
     required this.sourceHeight,
-    required this.cropLeft,
-    required this.cropTop,
-    required this.cropSize,
-    required this.standardizedSize,
     required this.analyzedAt,
   });
 
