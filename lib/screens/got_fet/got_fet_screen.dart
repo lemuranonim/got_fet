@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../domain/got_revision_rules.dart';
 import '../../services/got_fet_service.dart';
 import '../../services/session_manager.dart';
 import '../../theme/app_theme.dart';
@@ -115,8 +116,6 @@ class _GotFetScreenState extends State<GotFetScreen> {
   static const _batchListPageSize = 20;
   static const _gotPlotId = 'G1 - U1';
   static const _gotMaxEvidenceSlotsPerCategory = 6;
-
-  static const _gotLocationOptions = ['Malang', 'Tulungagung', 'Pasuruan'];
   static const _gotFieldAreaOptions = [0.009, 0.010, 0.012, 0.015, 0.020];
   static const _gotNoteTanamOptions = ['On Process', 'Done', 'Resampling'];
   static const _gotStatusSampleOptions = [
@@ -147,6 +146,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   StreamSubscription<List<Map<String, dynamic>>>? _sampleSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _gotObservationSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _gotEvidenceSubscription;
+  StreamSubscription<List<Map<String, dynamic>>>? _gotOffTypeSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _fetObservationSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _reviewTimelineSubscription;
 
@@ -172,6 +172,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   bool _hasPersistedGotObservation = false;
   bool _gotObservationSyncQueued = false;
   bool _gotEvidenceSyncQueued = false;
+  bool _gotOffTypeSyncQueued = false;
   bool _fetObservationSyncQueued = false;
   bool _reviewTimelineSyncQueued = false;
   bool _isRetryingPhotoQueue = false;
@@ -180,11 +181,19 @@ class _GotFetScreenState extends State<GotFetScreen> {
   String? _gotEvidenceLoadError;
   String? _gotObservationWatchKey;
   String? _gotEvidenceWatchKey;
+  String? _gotOffTypeWatchKey;
   String? _fetObservationWatchKey;
   String? _reviewTimelineWatchKey;
   String? _syncingGotEvidenceSlotKey;
   String? _reviewTimelineLoadError;
   Map<String, _GotEvidencePhoto> _gotEvidenceBySlot = {};
+  List<_GotOffTypeDetail> _gotOffTypeDetails = [];
+  List<_GotOffTypeRule> _gotOffTypeRules = _GotOffTypeRule.defaults;
+  List<_VillageCoordinate> _villageCoordinates = [];
+  bool _isLoadingGotOffTypes = false;
+  bool _isLoadingVillageCoordinates = false;
+  String? _gotOffTypeLoadError;
+  String? _villageCoordinateLoadError;
   List<_ReviewTimelineEvent> _reviewTimelineEvents = [];
   final Map<int, File> _fetPlotPhotosByReplication = {};
   final Map<int, _SmartPhotoMetadata> _fetPlotMetadataByReplication = {};
@@ -198,6 +207,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     super.initState();
     _loadSession();
     _loadSamplesFromDatabase();
+    unawaited(_loadOffTypeRules());
     unawaited(_initializeSmartPhotoPipeline());
     _replicationOne = _initialFetPoints();
     _replicationTwo = _initialFetPoints();
@@ -208,6 +218,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     _sampleSubscription?.cancel();
     _gotObservationSubscription?.cancel();
     _gotEvidenceSubscription?.cancel();
+    _gotOffTypeSubscription?.cancel();
     _fetObservationSubscription?.cancel();
     _reviewTimelineSubscription?.cancel();
     _gotNoteController.dispose();
@@ -607,7 +618,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   bool _samplePlantingReady(_GotFetSample sample) {
     return sample.plantingDate != null &&
-        sample.location != '-' &&
+        sample.village != '-' &&
+        sample.latitude != null &&
+        sample.longitude != null &&
         sample.fieldArea != null;
   }
 
@@ -658,6 +671,31 @@ class _GotFetScreenState extends State<GotFetScreen> {
   bool get _gotInputReady =>
       _hasPersistedGotObservation || _gotTotalObserved > 0;
 
+  List<String> get _gotOffTypePhotoLabels =>
+      GotRevisionRules.offTypePhotoLabels(_gotObservationStagePayload);
+
+  int get _gotRequiredOffTypePhotosPerSample => _gotOffTypePhotoLabels.length;
+
+  int get _gotRequiredOffTypeSampleCount =>
+      GotRevisionRules.requiredOffTypeSamples(_gotOffType);
+
+  int get _gotRequiredOffTypePhotoTotal =>
+      _gotRequiredOffTypeSampleCount * _gotRequiredOffTypePhotosPerSample;
+
+  List<_GotEvidenceSlot> _gotOffTypeSlotsForDetail(
+    _GotOffTypeDetail detail,
+  ) {
+    return [
+      for (var index = 0; index < _gotOffTypePhotoLabels.length; index++)
+        _GotEvidenceSlot(
+          category: _GotEvidenceCategory.offType,
+          rcvNo: index + 1,
+          offTypeDetailId: detail.id,
+          customLabel: _gotOffTypePhotoLabels[index],
+        ),
+    ];
+  }
+
   int get _gotEvidenceFilledCount {
     return [
       for (final slot in _gotEvidenceSlots)
@@ -665,10 +703,18 @@ class _GotFetScreenState extends State<GotFetScreen> {
     ].length;
   }
 
-  bool get _gotEvidenceReady {
-    final slots = _gotEvidenceSlots;
-    return slots.isNotEmpty && _gotEvidenceFilledCount == slots.length;
+  bool _gotOffTypeDetailPhotosReady(_GotOffTypeDetail detail) {
+    return _gotOffTypeSlotsForDetail(detail)
+        .every((slot) => _gotEvidenceBySlot.containsKey(slot.key));
   }
+
+  bool get _gotOffTypeDetailsReady {
+    if (_gotOffType == 0) return _gotOffTypeDetails.isEmpty;
+    return _gotOffTypeDetails.length == _gotRequiredOffTypeSampleCount &&
+        _gotOffTypeDetails.every(_gotOffTypeDetailPhotosReady);
+  }
+
+  bool get _gotEvidenceReady => _gotOffTypeDetailsReady;
 
   bool get _selectedSampleSubmittedOrReviewed {
     return _sampleObservationDone(_selectedSample);
@@ -714,6 +760,123 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final session = await SessionManager.instance.getActiveSession();
     if (!mounted) return;
     setState(() => _session = session);
+    unawaited(_loadVillageCoordinates());
+  }
+
+  Future<void> _loadOffTypeRules() async {
+    try {
+      final rows = await _gotFetService.fetchOffTypeRuleRows();
+      if (!mounted || rows.isEmpty) return;
+      setState(() {
+        _gotOffTypeRules = [
+          for (final row in rows)
+            _GotOffTypeRule(
+              id: _readText(row, const ['id']),
+              categoryNo: _readInt(row, const ['category_no']),
+              typeCode: _readText(row, const ['type_code'], fallback: ''),
+              label: _readText(row, const ['label']),
+            ),
+        ];
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _gotOffTypeRules = _GotOffTypeRule.defaults);
+    }
+  }
+
+  Future<void> _loadVillageCoordinates() async {
+    setState(() {
+      _isLoadingVillageCoordinates = true;
+      _villageCoordinateLoadError = null;
+    });
+    try {
+      final rows = await _gotFetService.fetchVillageCoordinateRows();
+      final grouped = <String, List<Map<String, dynamic>>>{};
+      for (final row in rows) {
+        final village = row['village_desa']?.toString().trim() ?? '';
+        if (village.isEmpty) continue;
+        final coordinate = _parseVillageCoordinate(
+              row['correction_tagging']?.toString(),
+            ) ??
+            _parseVillageCoordinate(row['coordinate']?.toString());
+        if (coordinate == null) continue;
+        final region = row['region']?.toString().trim() ?? '';
+        final district = row['district_kab']?.toString().trim() ?? '';
+        final subDistrict = row['sub_district_kec']?.toString().trim() ?? '';
+        final sessionRegion = _session?.region?.trim() ?? '';
+        final sessionDistrict = _session?.district?.trim() ?? '';
+        if (sessionRegion.isNotEmpty &&
+            region.toLowerCase() != sessionRegion.toLowerCase()) {
+          continue;
+        }
+        if (sessionDistrict.isNotEmpty &&
+            district.toLowerCase() != sessionDistrict.toLowerCase()) {
+          continue;
+        }
+        final key = [region, district, subDistrict, village]
+            .map((value) => value.toLowerCase())
+            .join('|');
+        grouped.putIfAbsent(key, () => []).add({
+          'region': region,
+          'district': district,
+          'subDistrict': subDistrict,
+          'village': village,
+          'latitude': coordinate.lat,
+          'longitude': coordinate.lng,
+        });
+      }
+
+      final villages = <_VillageCoordinate>[];
+      for (final entries in grouped.values) {
+        var latitudeTotal = 0.0;
+        var longitudeTotal = 0.0;
+        for (final entry in entries) {
+          latitudeTotal += entry['latitude'] as double;
+          longitudeTotal += entry['longitude'] as double;
+        }
+        final first = entries.first;
+        villages.add(
+          _VillageCoordinate(
+            region: first['region'] as String,
+            district: first['district'] as String,
+            subDistrict: first['subDistrict'] as String,
+            village: first['village'] as String,
+            latitude: latitudeTotal / entries.length,
+            longitude: longitudeTotal / entries.length,
+            sourceCount: entries.length,
+          ),
+        );
+      }
+      villages.sort((a, b) {
+        final districtCompare = a.district.compareTo(b.district);
+        if (districtCompare != 0) return districtCompare;
+        final subCompare = a.subDistrict.compareTo(b.subDistrict);
+        if (subCompare != 0) return subCompare;
+        return a.village.compareTo(b.village);
+      });
+      if (!mounted) return;
+      setState(() {
+        _villageCoordinates = villages;
+        _isLoadingVillageCoordinates = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingVillageCoordinates = false;
+        _villageCoordinateLoadError = _friendlyError(error);
+      });
+    }
+  }
+
+  ({double lat, double lng})? _parseVillageCoordinate(String? raw) {
+    if (raw == null || !raw.contains(',')) return null;
+    final parts = raw.split(',');
+    if (parts.length < 2) return null;
+    final lat = double.tryParse(parts[0].trim());
+    final lng = double.tryParse(parts[1].trim());
+    if (lat == null || lng == null) return null;
+    if (!GotRevisionRules.isValidIndonesiaCoordinate(lat, lng)) return null;
+    return (lat: lat, lng: lng);
   }
 
   Future<void> _loadSamplesFromDatabase() async {
@@ -776,6 +939,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       unawaited(_watchSelectedGotObservation());
     });
     _queueSelectedGotEvidenceSync();
+    _queueSelectedGotOffTypeSync();
     _queueSelectedFetObservationSync();
     _queueSelectedReviewTimelineSync();
   }
@@ -787,6 +951,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
       if (!mounted) return;
       _gotEvidenceSyncQueued = false;
       unawaited(_watchSelectedGotEvidence());
+    });
+  }
+
+  void _queueSelectedGotOffTypeSync() {
+    if (_gotOffTypeSyncQueued) return;
+    _gotOffTypeSyncQueued = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _gotOffTypeSyncQueued = false;
+      unawaited(_watchSelectedGotOffTypes());
     });
   }
 
@@ -1024,6 +1198,86 @@ class _GotFetScreenState extends State<GotFetScreen> {
       photoUrl: photoUrl,
       uploadedBy: _readText(row, const ['uploaded_by']),
       uploadedAt: _readDate(row, const ['uploaded_datetime']),
+      offTypeDetailId: _readNullableText(row, const ['off_type_detail_id']),
+    );
+  }
+
+  Future<void> _watchSelectedGotOffTypes() async {
+    if (!_hasSamples || !_sampleSupportsModule(_selectedSample, 'GOT')) {
+      _gotOffTypeWatchKey = null;
+      await _gotOffTypeSubscription?.cancel();
+      _gotOffTypeSubscription = null;
+      if (!mounted) return;
+      setState(() {
+        _isLoadingGotOffTypes = false;
+        _gotOffTypeLoadError = null;
+        _gotOffTypeDetails = [];
+      });
+      return;
+    }
+
+    final sample = _selectedSample;
+    final stage = _gotObservationStagePayload;
+    final watchKey = [
+      sample.lotId,
+      sample.sampleId,
+      _gotPlotId,
+      stage,
+    ].join('|');
+    if (_gotOffTypeWatchKey == watchKey) return;
+
+    _gotOffTypeWatchKey = watchKey;
+    await _gotOffTypeSubscription?.cancel();
+    _gotOffTypeSubscription = null;
+    if (!mounted) return;
+    setState(() {
+      _isLoadingGotOffTypes = true;
+      _gotOffTypeLoadError = null;
+      _gotOffTypeDetails = [];
+    });
+
+    _gotOffTypeSubscription = _gotFetService
+        .watchGotOffTypeDetailRows(
+      lotId: sample.lotId,
+      sampleId: sample.sampleId,
+      plotId: _gotPlotId,
+      stage: stage,
+    )
+        .listen(
+      (rows) {
+        if (!mounted || _gotOffTypeWatchKey != watchKey) return;
+        setState(() {
+          _isLoadingGotOffTypes = false;
+          _gotOffTypeLoadError = null;
+          _gotOffTypeDetails = [
+            for (final row in rows) _gotOffTypeDetailFromRow(row),
+          ];
+        });
+      },
+      onError: (Object error) {
+        if (!mounted || _gotOffTypeWatchKey != watchKey) return;
+        setState(() {
+          _isLoadingGotOffTypes = false;
+          _gotOffTypeLoadError = _friendlyError(error);
+        });
+      },
+    );
+  }
+
+  _GotOffTypeDetail _gotOffTypeDetailFromRow(Map<String, dynamic> row) {
+    return _GotOffTypeDetail(
+      id: _readText(row, const ['id']),
+      ruleId: _readText(row, const ['rule_id']),
+      categoryNo: _readInt(row, const ['category_no']),
+      typeCode: _readText(row, const ['type_code'], fallback: ''),
+      typeLabel: _readText(row, const ['type_label']),
+      characterNote: _readText(row, const ['character_note']),
+      similarity: _GotOffTypeSimilarityX.fromPayload(
+        _readText(row, const ['similarity_assessment']),
+      ),
+      referenceHybrid: _readText(row, const ['reference_hybrid'], fallback: ''),
+      requiredPhotoCount:
+          math.max(1, _readInt(row, const ['required_photo_count'])),
     );
   }
 
@@ -2480,7 +2734,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _buildGotObservationSyncStatus(),
           const SizedBox(height: 12),
           _GuidanceBanner(
-            text: 'Folder evidence dibuat otomatis dari jumlah input hasil GOT',
+            text: _gotOffType == 0
+                ? 'Belum ada temuan Off-Type; tidak ada paket foto sampel yang wajib.'
+                : 'Wajib $_gotRequiredOffTypeSampleCount sampel dari $_gotOffType temuan Off-Type × $_gotRequiredOffTypePhotosPerSample foto untuk $_gotObservationStageLabel = $_gotRequiredOffTypePhotoTotal foto.',
             color: AdvantaColors.success,
           ),
           const SizedBox(height: 12),
@@ -2522,6 +2778,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildGotCountForm(),
           const SizedBox(height: 12),
+          _buildGotOffTypeDetailsCard(),
+          const SizedBox(height: 12),
           _buildGotEvidenceSummaryCard(),
           const SizedBox(height: 12),
           _buildSmartCameraStatusCard(module: 'GOT'),
@@ -2535,7 +2793,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
             rightLabel: 'Submit $_gotObservationStageLabel',
             leftIcon: Icons.save_outlined,
             rightIcon: _gotStageIcon,
-            rightEnabled: _gotCountsValid && !_isSyncing,
+            rightEnabled: _gotPlanningReady &&
+                _gotCountsValid &&
+                _gotEvidenceReady &&
+                !_isSyncing,
             rightColor: _gotStageAccentColor,
             onLeft: () => _showSnack(
               'Draft GOT $_gotObservationStageLabel disimpan lokal.',
@@ -2761,6 +3022,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _buildGotStageSelector(),
           const SizedBox(height: 14),
           _buildGotReviewResult(),
+          const SizedBox(height: 14),
+          _buildGotOffTypeDetailsCard(readOnly: true),
           const SizedBox(height: 14),
           _buildReviewTimeline(),
           const SizedBox(height: 16),
@@ -3421,16 +3684,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             },
           ),
           const SizedBox(height: 10),
-          _buildGotDropdown<String>(
-            label: 'Location',
-            value: sample.location,
-            options: _gotLocationOptions,
-            text: (value) => value,
-            onChanged: (value) {
-              setState(() => sample.location = value);
-              _persistSelectedSamplePlanning();
-            },
-          ),
+          _buildVillageCoordinateSelector(sample),
           const SizedBox(height: 10),
           _buildGotDropdown<double>(
             label: 'Field Area',
@@ -3495,15 +3749,155 @@ class _GotFetScreenState extends State<GotFetScreen> {
             width: double.infinity,
             child: ElevatedButton.icon(
               icon: const Icon(Icons.save_rounded),
-              label: const Text('Simpan Data Tanam'),
-              onPressed: _isSyncing
+              label: const Text('Simpan & Tandai Tanam'),
+              onPressed: _isSyncing || !_gotPlanningReady
                   ? null
-                  : () => _persistSelectedSamplePlanning(showResult: true),
+                  : _markSelectedSamplePlanted,
             ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildVillageCoordinateSelector(_GotFetSample sample) {
+    final hasCoordinate = sample.latitude != null && sample.longitude != null;
+    final subtitle = _isLoadingVillageCoordinates
+        ? 'Memuat Village Coordinate...'
+        : _villageCoordinateLoadError != null
+            ? 'Gagal memuat: $_villageCoordinateLoadError'
+            : hasCoordinate
+                ? '${sample.latitude!.toStringAsFixed(6)}, ${sample.longitude!.toStringAsFixed(6)}'
+                : 'Pilih desa dari master_fields';
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: _isLoadingVillageCoordinates ? null : _openVillageCoordinatePicker,
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'Village Coordinate',
+          prefixIcon: Icon(Icons.location_on_rounded),
+          filled: true,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    sample.village == '-' ? 'Belum dipilih' : sample.location,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    style: AdvantaText.caption.copyWith(
+                      color: _gotFetMutedColor(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.arrow_drop_down_rounded),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openVillageCoordinatePicker() async {
+    var query = '';
+    final selected = await showModalBottomSheet<_VillageCoordinate>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final normalized = query.trim().toLowerCase();
+            final filtered = _villageCoordinates.where((village) {
+              if (normalized.isEmpty) return true;
+              return [
+                village.village,
+                village.subDistrict,
+                village.district,
+                village.region,
+                village.coordinateLabel,
+              ].join(' ').toLowerCase().contains(normalized);
+            }).toList();
+            return Padding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                0,
+                16,
+                16 + MediaQuery.viewInsetsOf(context).bottom,
+              ),
+              child: SizedBox(
+                height: MediaQuery.sizeOf(context).height * .72,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Pilih Village Coordinate',
+                      style: AdvantaText.heading3.copyWith(
+                        color: _strongTextColor(context),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      autofocus: true,
+                      decoration: const InputDecoration(
+                        hintText: 'Cari desa, kecamatan, kabupaten...',
+                        prefixIcon: Icon(Icons.search_rounded),
+                      ),
+                      onChanged: (value) {
+                        setSheetState(() => query = value);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    Expanded(
+                      child: filtered.isEmpty
+                          ? const Center(
+                              child: Text('Village Coordinate tidak ditemukan'),
+                            )
+                          : ListView.builder(
+                              itemCount: filtered.length,
+                              itemBuilder: (context, index) {
+                                final village = filtered[index];
+                                return ListTile(
+                                  leading: const Icon(Icons.place_outlined),
+                                  title: Text(village.locationLabel),
+                                  subtitle: Text(
+                                    '${village.coordinateLabel} • ${village.sourceCount} sumber',
+                                  ),
+                                  onTap: () =>
+                                      Navigator.pop(sheetContext, village),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    if (selected == null || !mounted) return;
+    final sample = _selectedSample;
+    setState(() {
+      sample.location = selected.locationLabel;
+      sample.village = selected.village;
+      sample.subDistrict = selected.subDistrict;
+      sample.district = selected.district;
+      sample.latitude = selected.latitude;
+      sample.longitude = selected.longitude;
+    });
+    await _persistSelectedSamplePlanning();
   }
 
   Widget _buildGotDropdown<T>({
@@ -3978,7 +4372,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
     final categoryCards = [
       for (final category in _GotEvidenceCategory.values)
-        _buildGotEvidenceCategoryCard(category),
+        if (category != _GotEvidenceCategory.offType)
+          _buildGotEvidenceCategoryCard(category),
     ];
 
     return Column(
@@ -4030,7 +4425,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Jumlah ${category.title}: $count | $filledCount/${slots.length} foto evidence (maks $_gotMaxEvidenceSlotsPerCategory)',
+                      'Jumlah ${category.title}: $count | $filledCount/${slots.length} foto pendukung (maks $_gotMaxEvidenceSlotsPerCategory)',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: AdvantaText.caption.copyWith(
@@ -4091,12 +4486,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
-  List<_GotEvidenceSlot> get _gotEvidenceSlots {
-    return [
-      for (final category in _GotEvidenceCategory.values)
-        ..._gotEvidenceSlotsForCategory(category),
-    ];
-  }
+  List<_GotEvidenceSlot> get _gotEvidenceSlots => [
+        for (final detail in _gotOffTypeDetails)
+          ..._gotOffTypeSlotsForDetail(detail),
+      ];
 
   List<_GotEvidenceSlot> _gotEvidenceSlotsForCategory(
     _GotEvidenceCategory category,
@@ -4130,6 +4523,396 @@ class _GotFetScreenState extends State<GotFetScreen> {
       _GotEvidenceCategory.selfing => const Color(0xFF5B5BD6),
       _GotEvidenceCategory.male => AdvantaColors.navy,
     };
+  }
+
+  Widget _buildGotOffTypeDetailsCard({bool readOnly = false}) {
+    final expected = _gotRequiredOffTypeSampleCount;
+    final actual = _gotOffTypeDetails.length;
+    final ready = _gotOffTypeDetailsReady;
+    final color = ready ? AdvantaColors.success : AdvantaColors.warning;
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.rule_folder_rounded, color: color),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Detail Off-Type',
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(label: '$actual/$expected sampel', color: color),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            expected == 0
+                ? 'Tidak ada Off-Type pada hasil pengamatan.'
+                : 'Dokumentasikan $expected sampel dari $_gotOffType temuan. Setiap sampel wajib memiliki kategori, catatan karakter, penilaian kemiripan, dan $_gotRequiredOffTypePhotosPerSample foto $_gotObservationStageLabel.',
+            style: AdvantaText.body2.copyWith(
+              color: _gotFetMutedColor(context),
+              height: 1.35,
+            ),
+          ),
+          if (_isLoadingGotOffTypes) ...[
+            const SizedBox(height: 12),
+            const LinearProgressIndicator(),
+          ],
+          if (_gotOffTypeLoadError != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              'Detail Off-Type belum dapat dimuat: $_gotOffTypeLoadError',
+              style: AdvantaText.caption.copyWith(color: AdvantaColors.error),
+            ),
+          ],
+          for (var index = 0; index < _gotOffTypeDetails.length; index++) ...[
+            const SizedBox(height: 12),
+            _buildGotOffTypeDetailItem(
+              _gotOffTypeDetails[index],
+              index: index,
+              readOnly: readOnly,
+            ),
+          ],
+          if (!readOnly && expected > actual) ...[
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _openGotOffTypeEditor,
+                icon: const Icon(Icons.add_rounded),
+                label: Text('Tambah Sampel Off-Type ${actual + 1}'),
+              ),
+            ),
+          ],
+          if (!readOnly && actual > expected) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Jumlah sampel melebihi target maksimum. Hapus ${actual - expected} sampel atau sesuaikan jumlah temuan.',
+              style: AdvantaText.caption.copyWith(color: AdvantaColors.error),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGotOffTypeDetailItem(
+    _GotOffTypeDetail detail, {
+    required int index,
+    required bool readOnly,
+  }) {
+    final slots = _gotOffTypeSlotsForDetail(detail);
+    final filled =
+        slots.where((slot) => _gotEvidenceBySlot.containsKey(slot.key)).length;
+    final ready = filled == slots.length;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: _gotFetBorderColor(context)),
+        color: _gotStageAccentColor.withAlpha(
+          _gotFetIsDark(context) ? 20 : 10,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'OT ${index + 1} • ${detail.title}',
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _gotFetTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: '$filled/${slots.length} foto',
+                color: ready ? AdvantaColors.success : AdvantaColors.warning,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            detail.similarity.label,
+            style: AdvantaText.caption.copyWith(
+              color: _gotFetMutedColor(context),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          if (detail.referenceHybrid.trim().isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text('Pembanding: ${detail.referenceHybrid}'),
+          ],
+          const SizedBox(height: 6),
+          Text('Karakter: ${detail.characterNote}'),
+          const SizedBox(height: 10),
+          if (readOnly)
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final slot in slots)
+                  _StatusPill(
+                    label: _gotEvidenceBySlot.containsKey(slot.key)
+                        ? '${slot.label} ada'
+                        : '${slot.label} kosong',
+                    color: _gotEvidenceBySlot.containsKey(slot.key)
+                        ? AdvantaColors.success
+                        : AdvantaColors.warning,
+                  ),
+              ],
+            )
+          else
+            for (var i = 0; i < slots.length; i++) ...[
+              _GotEvidenceSlotTile(
+                slot: slots[i],
+                photo: _gotEvidenceBySlot[slots[i].key],
+                color: AdvantaColors.error,
+                syncing: _syncingGotEvidenceSlotKey == slots[i].key,
+                onCapture: () =>
+                    _pickGotEvidenceForSlot(slots[i], ImageSource.camera),
+                onGallery: () =>
+                    _pickGotEvidenceForSlot(slots[i], ImageSource.gallery),
+                onView: _gotEvidenceBySlot[slots[i].key] == null
+                    ? null
+                    : () => _openGotEvidenceViewer(
+                          slots[i],
+                          _gotEvidenceBySlot[slots[i].key]!,
+                        ),
+              ),
+              if (i != slots.length - 1) const SizedBox(height: 8),
+            ],
+          if (!readOnly) ...[
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _openGotOffTypeEditor(detail),
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('Edit'),
+                ),
+                TextButton.icon(
+                  onPressed: () => _deleteGotOffTypeDetail(detail),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('Hapus'),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openGotOffTypeEditor([
+    _GotOffTypeDetail? detail,
+  ]) async {
+    if (_gotOffTypeRules.isEmpty) {
+      _showSnack('Master kategori Off-Type belum tersedia.');
+      return;
+    }
+    var selectedRule = _gotOffTypeRules.firstWhere(
+      (rule) => rule.id == detail?.ruleId,
+      orElse: () => _gotOffTypeRules.first,
+    );
+    var similarity =
+        detail?.similarity ?? _GotOffTypeSimilarity.similarFiOrHybrid;
+    var saving = false;
+    final characterController =
+        TextEditingController(text: detail?.characterNote ?? '');
+    final referenceController =
+        TextEditingController(text: detail?.referenceHybrid ?? '');
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text(detail == null
+                  ? 'Tambah Detail Off-Type'
+                  : 'Edit Detail Off-Type'),
+              content: SizedBox(
+                width: 520,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      DropdownButtonFormField<String>(
+                        initialValue: selectedRule.id,
+                        decoration:
+                            const InputDecoration(labelText: 'Kategori / Tipe'),
+                        items: [
+                          for (final rule in _gotOffTypeRules)
+                            DropdownMenuItem(
+                              value: rule.id,
+                              child: Text(
+                                rule.displayLabel,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: saving
+                            ? null
+                            : (value) {
+                                if (value == null) return;
+                                setDialogState(() {
+                                  selectedRule = _gotOffTypeRules.firstWhere(
+                                    (rule) => rule.id == value,
+                                  );
+                                });
+                              },
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonFormField<_GotOffTypeSimilarity>(
+                        initialValue: similarity,
+                        decoration: const InputDecoration(
+                          labelText: 'Penilaian kemiripan',
+                        ),
+                        items: [
+                          for (final value in _GotOffTypeSimilarity.values)
+                            DropdownMenuItem(
+                              value: value,
+                              child: Text(value.label),
+                            ),
+                        ],
+                        onChanged: saving
+                            ? null
+                            : (value) {
+                                if (value == null) return;
+                                setDialogState(() => similarity = value);
+                              },
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: referenceController,
+                        enabled: !saving,
+                        decoration: const InputDecoration(
+                          labelText: 'FI / hybrid pembanding',
+                          hintText: 'Optional',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: characterController,
+                        enabled: !saving,
+                        minLines: 2,
+                        maxLines: 4,
+                        decoration: const InputDecoration(
+                          labelText: 'Catatan karakter *',
+                          hintText: 'Jelaskan karakter pembeda tanaman',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: saving ? null : () => Navigator.pop(dialogContext),
+                  child: const Text('Batal'),
+                ),
+                FilledButton.icon(
+                  onPressed: saving
+                      ? null
+                      : () async {
+                          final character = characterController.text.trim();
+                          if (character.isEmpty) {
+                            _showSnack('Catatan karakter wajib diisi.');
+                            return;
+                          }
+                          setDialogState(() => saving = true);
+                          try {
+                            await _gotFetService.saveGotOffTypeDetail(
+                              id: detail?.id,
+                              lotId: _selectedSample.lotId,
+                              sampleId: _selectedSample.sampleId,
+                              plotId: _gotPlotId,
+                              stage: _gotObservationStagePayload,
+                              ruleId: selectedRule.id,
+                              categoryNo: selectedRule.categoryNo,
+                              typeCode: selectedRule.typeCode,
+                              typeLabel: selectedRule.label,
+                              characterNote: character,
+                              similarityAssessment: similarity.payload,
+                              referenceHybrid: referenceController.text.trim(),
+                              requiredPhotoCount:
+                                  _gotRequiredOffTypePhotosPerSample,
+                              sortOrder: detail == null
+                                  ? _gotOffTypeDetails.length
+                                  : _gotOffTypeDetails.indexOf(detail),
+                              actor: _actorName,
+                            );
+                            if (!dialogContext.mounted) return;
+                            Navigator.pop(dialogContext);
+                          } catch (error) {
+                            if (!mounted) return;
+                            _showSnack(
+                              'Gagal simpan detail Off-Type: ${_friendlyError(error)}',
+                            );
+                            setDialogState(() => saving = false);
+                          }
+                        },
+                  icon: saving
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.save_rounded),
+                  label: Text(saving ? 'Menyimpan...' : 'Simpan'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    characterController.dispose();
+    referenceController.dispose();
+  }
+
+  Future<void> _deleteGotOffTypeDetail(
+    _GotOffTypeDetail detail,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Hapus detail Off-Type?'),
+        content: Text(
+          '${detail.title} beserta metadata fotonya akan dihapus.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Hapus'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _gotFetService.deleteGotOffTypeDetail(detail.id);
+      if (mounted) _showSnack('Detail Off-Type dihapus.');
+    } catch (error) {
+      if (!mounted) return;
+      _showSnack('Gagal hapus detail: ${_friendlyError(error)}');
+    }
   }
 
   Widget _buildNoteBox({
@@ -4960,10 +5743,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
           sampleId: _selectedSample.sampleId,
           plotId: _gotPlotId,
           stage: _gotObservationStagePayload,
-          category: slot.category.key,
+          category: slot.evidenceCategoryKey,
           rcvNo: slot.rcvNo,
           rcvLabel: slot.label,
           uploadedBy: _actorName,
+          offTypeDetailId: slot.offTypeDetailId,
         );
       } catch (_) {
         await _photoPipeline.enqueueGotEvidence(
@@ -5407,6 +6191,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
         weekOfResultEstimation: sample.weekOfResultEstimation,
         noteTanam: sample.noteTanam,
         location: sample.location,
+        village: sample.village,
+        subDistrict: sample.subDistrict,
+        district: sample.district,
+        latitude: sample.latitude,
+        longitude: sample.longitude,
         fieldArea: sample.fieldArea,
         statusSample: sample.statusSample,
       );
@@ -5419,9 +6208,63 @@ class _GotFetScreenState extends State<GotFetScreen> {
     }
   }
 
+  Future<void> _markSelectedSamplePlanted() async {
+    final sample = _selectedSample;
+    if (!_gotPlanningReady ||
+        sample.plantingDate == null ||
+        sample.weekOfPlanting == null ||
+        sample.resultEstimation == null ||
+        sample.weekOfResultEstimation == null ||
+        sample.latitude == null ||
+        sample.longitude == null ||
+        sample.fieldArea == null) {
+      _showSnack(
+        'Lengkapi tanggal tanam, Village Coordinate, dan field area.',
+      );
+      return;
+    }
+
+    await _runBackendAction(
+      successMessage: 'Batch ${sample.batch} berhasil ditandai Tanam.',
+      action: () async {
+        await _gotFetService.markSamplePlanted(
+          batch: sample.batch,
+          lotId: sample.lotId,
+          plantingDate: sample.plantingDate!,
+          weekOfPlanting: sample.weekOfPlanting!,
+          resultEstimation: sample.resultEstimation!,
+          weekOfResultEstimation: sample.weekOfResultEstimation!,
+          location: sample.location,
+          village: sample.village,
+          subDistrict: sample.subDistrict,
+          district: sample.district,
+          latitude: sample.latitude!,
+          longitude: sample.longitude!,
+          fieldArea: sample.fieldArea!,
+          actor: _actorName,
+        );
+        if (!mounted) return;
+        setState(() {
+          sample.noteTanam = 'Done';
+          sample.statusSample = 'Planted';
+        });
+      },
+    );
+  }
+
   Future<void> _submitGotResult() async {
+    if (!_gotPlanningReady) {
+      _showSnack('Batch harus ditandai Tanam sebelum observasi GOT.');
+      return;
+    }
     if (!_gotCountsValid) {
       _showSnack('Jumlah off-type, selfing, dan male melebihi total tanaman.');
+      return;
+    }
+    if (!_gotEvidenceReady) {
+      _showSnack(
+        'Lengkapi $_gotRequiredOffTypeSampleCount sampel Off-Type × $_gotRequiredOffTypePhotosPerSample foto ($_gotRequiredOffTypePhotoTotal foto).',
+      );
       return;
     }
 
@@ -5910,6 +6753,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
       ),
       noteTanam: _readText(row, const ['note_tanam', 'Note Tanam']),
       location: _readText(row, const ['location', 'Location']),
+      village:
+          _readText(row, const ['village_desa', 'Village', 'Village Desa']),
+      subDistrict: _readText(
+        row,
+        const ['sub_district_kec', 'Sub District', 'Kecamatan'],
+      ),
+      district: _readText(row, const ['district_kab', 'District', 'Kabupaten']),
+      latitude: _readDouble(row, const ['latitude']),
+      longitude: _readDouble(row, const ['longitude']),
       fieldArea: _readDouble(row, const ['field_area', 'Field Area']),
       statusGot2: _readText(row, const ['status_got_2', 'Status GOT 2']),
       statusGotVeg: _readText(

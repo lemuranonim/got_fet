@@ -99,7 +99,8 @@ class SupabaseAuthService {
     try {
       final data = await _supabase
           .from('app_users')
-          .select('id, email, name, role, action, is_active')
+          .select(
+              'id, email, name, role, action, region, district_kab, is_active')
           .eq('id', uid)
           .maybeSingle();
 

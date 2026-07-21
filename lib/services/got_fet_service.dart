@@ -16,6 +16,9 @@ class GotFetService {
   static const photoEvidenceTable = 'got_fet_photo_evidence';
   static const sampleTrackingTable = 'got_fet_sample_tracking';
   static const reviewHistoryTable = 'got_fet_review_history';
+  static const masterFieldsTable = 'master_fields';
+  static const offTypeRulesTable = 'got_fet_off_type_rules';
+  static const offTypeDetailsTable = 'got_fet_off_type_details';
 
   Stream<List<Map<String, dynamic>>> watchSampleRows() {
     return _supabase
@@ -75,6 +78,11 @@ class GotFetService {
     int? weekOfResultEstimation,
     String? noteTanam,
     String? location,
+    String? village,
+    String? subDistrict,
+    String? district,
+    double? latitude,
+    double? longitude,
     double? fieldArea,
     String? statusSample,
   }) async {
@@ -85,6 +93,11 @@ class GotFetService {
       'week_of_result_estimation': weekOfResultEstimation,
       'note_tanam': noteTanam,
       'location': location,
+      'village_desa': village,
+      'sub_district_kec': subDistrict,
+      'district_kab': district,
+      'latitude': latitude,
+      'longitude': longitude,
       'field_area': fieldArea,
       'status_sample': statusSample,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
@@ -99,6 +112,84 @@ class GotFetService {
       'status_sample': status,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }).eq('batch', batch);
+  }
+
+  Future<List<Map<String, dynamic>>> fetchVillageCoordinateRows() async {
+    const pageSize = 1000;
+    final rows = <Map<String, dynamic>>[];
+    var from = 0;
+
+    while (true) {
+      final response = await _supabase.from(masterFieldsTable).select('''
+        region,
+        district_kab,
+        sub_district_kec,
+        village_desa,
+        coordinate,
+        correction_tagging
+      ''').range(from, from + pageSize - 1);
+      final page = [
+        for (final row in response) Map<String, dynamic>.from(row),
+      ];
+      rows.addAll(page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+
+    return rows;
+  }
+
+  Future<List<Map<String, dynamic>>> fetchOffTypeRuleRows() async {
+    final response = await _supabase
+        .from(offTypeRulesTable)
+        .select()
+        .eq('is_active', true)
+        .order('category_no')
+        .order('type_code');
+    return [
+      for (final row in response) Map<String, dynamic>.from(row),
+    ];
+  }
+
+  Future<void> markSamplePlanted({
+    required String batch,
+    required String lotId,
+    required DateTime plantingDate,
+    required int weekOfPlanting,
+    required DateTime resultEstimation,
+    required int weekOfResultEstimation,
+    required String location,
+    required String village,
+    required String subDistrict,
+    required String district,
+    required double latitude,
+    required double longitude,
+    required double fieldArea,
+    required String actor,
+  }) async {
+    await updateSamplePlanning(
+      batch: batch,
+      plantingDate: plantingDate,
+      weekOfPlanting: weekOfPlanting,
+      resultEstimation: resultEstimation,
+      weekOfResultEstimation: weekOfResultEstimation,
+      noteTanam: 'Done',
+      location: location,
+      village: village,
+      subDistrict: subDistrict,
+      district: district,
+      latitude: latitude,
+      longitude: longitude,
+      fieldArea: fieldArea,
+      statusSample: 'Planted',
+    );
+    await appendTrackingEvent(
+      lotId: lotId,
+      status: 'Planted',
+      actor: actor,
+      remarks: 'Batch $batch ditandai Tanam berdasarkan Village Coordinate',
+      eventAt: DateTime.now().toUtc().toIso8601String(),
+    );
   }
 
   Stream<List<Map<String, dynamic>>> watchGotObservationRows({
@@ -428,6 +519,87 @@ class GotFetService {
     );
   }
 
+  Stream<List<Map<String, dynamic>>> watchGotOffTypeDetailRows({
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required String stage,
+  }) {
+    return _supabase
+        .from(offTypeDetailsTable)
+        .stream(primaryKey: ['id'])
+        .eq('sample_id', sampleId)
+        .order('sort_order')
+        .map((rows) => [
+              for (final row in rows)
+                if (row['lot_id']?.toString() == lotId &&
+                    row['plot_id']?.toString() == plotId &&
+                    row['observation_stage']?.toString() == stage)
+                  Map<String, dynamic>.from(row),
+            ]);
+  }
+
+  Future<Map<String, dynamic>> saveGotOffTypeDetail({
+    String? id,
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required String stage,
+    required String ruleId,
+    required int categoryNo,
+    required String typeCode,
+    required String typeLabel,
+    required String characterNote,
+    required String similarityAssessment,
+    required String referenceHybrid,
+    required int requiredPhotoCount,
+    required int sortOrder,
+    required String actor,
+  }) async {
+    final now = DateTime.now().toUtc().toIso8601String();
+    final payload = {
+      'lot_id': lotId,
+      'sample_id': sampleId,
+      'plot_id': plotId,
+      'observation_stage': stage,
+      'rule_id': ruleId,
+      'category_no': categoryNo,
+      'type_code': typeCode,
+      'type_label': typeLabel,
+      'character_note': characterNote,
+      'similarity_assessment': similarityAssessment,
+      'reference_hybrid': referenceHybrid,
+      'required_photo_count': requiredPhotoCount,
+      'sort_order': sortOrder,
+      'updated_by': actor,
+      'updated_at': now,
+    };
+
+    if (id == null || id.trim().isEmpty) {
+      final response = await _supabase
+          .from(offTypeDetailsTable)
+          .insert({
+            ...payload,
+            'created_by': actor,
+          })
+          .select()
+          .single();
+      return Map<String, dynamic>.from(response);
+    }
+
+    final response = await _supabase
+        .from(offTypeDetailsTable)
+        .update(payload)
+        .eq('id', id)
+        .select()
+        .single();
+    return Map<String, dynamic>.from(response);
+  }
+
+  Future<void> deleteGotOffTypeDetail(String id) async {
+    await _supabase.from(offTypeDetailsTable).delete().eq('id', id);
+  }
+
   Stream<List<Map<String, dynamic>>> watchGotEvidenceRows({
     required String lotId,
     required String sampleId,
@@ -473,6 +645,7 @@ class GotFetService {
     required int rcvNo,
     required String rcvLabel,
     required String uploadedBy,
+    String? offTypeDetailId,
   }) async {
     final uploadedAt = DateTime.now().toUtc().toIso8601String();
     if (!file.existsSync()) {
@@ -491,7 +664,8 @@ class GotFetService {
       lotId: lotId,
       module: 'got',
       stage: stage,
-      category: category,
+      category:
+          offTypeDetailId == null ? category : '${category}_$offTypeDetailId',
       replication: rcvLabel,
     );
     final photoUrl =
@@ -507,6 +681,7 @@ class GotFetService {
       'evidence_category': category,
       'rcv_no': rcvNo,
       'rcv_label': rcvLabel,
+      'off_type_detail_id': offTypeDetailId,
       'storage_path': uploadedPath,
       'photo_url': photoUrl,
       'uploaded_by': uploadedBy,
@@ -517,17 +692,20 @@ class GotFetService {
     };
 
     try {
-      final existing = await _supabase
+      final candidates = await _supabase
           .from(photoEvidenceTable)
-          .select('id')
+          .select('id, off_type_detail_id')
           .eq('lot_id', lotId)
           .eq('sample_id', sampleId)
           .eq('module', 'got')
           .eq('plot_id', plotId)
           .eq('observation_stage', stage)
           .eq('evidence_category', category)
-          .eq('rcv_no', rcvNo)
-          .limit(1);
+          .eq('rcv_no', rcvNo);
+      final existing = [
+        for (final row in candidates)
+          if (row['off_type_detail_id']?.toString() == offTypeDetailId) row,
+      ];
 
       if (existing.isEmpty) {
         await _supabase.from(photoEvidenceTable).insert(payload);
@@ -536,17 +714,9 @@ class GotFetService {
 
       final existingId = existing.first['id'];
       if (existingId == null) {
-        await _supabase
-            .from(photoEvidenceTable)
-            .update(payload)
-            .eq('lot_id', lotId)
-            .eq('sample_id', sampleId)
-            .eq('module', 'got')
-            .eq('plot_id', plotId)
-            .eq('observation_stage', stage)
-            .eq('evidence_category', category)
-            .eq('rcv_no', rcvNo);
-        return;
+        throw const GotFetStorageException(
+          'Metadata evidence ditemukan tanpa ID yang valid.',
+        );
       }
 
       await _supabase

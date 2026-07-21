@@ -87,7 +87,8 @@ class _SmartPhotoPipeline {
       sampleId: sampleId,
       plotId: plotId,
       stage: stage,
-      category: slot.category.key,
+      category: slot.evidenceCategoryKey,
+      offTypeDetailId: slot.offTypeDetailId,
       rcvNo: slot.rcvNo,
       rcvLabel: slot.label,
       uploadedBy: uploadedBy,
@@ -126,6 +127,7 @@ class _SmartPhotoPipeline {
           rcvNo: entry.rcvNo,
           rcvLabel: entry.rcvLabel,
           uploadedBy: entry.uploadedBy,
+          offTypeDetailId: entry.offTypeDetailId,
         );
         synced++;
       } catch (_) {
@@ -515,6 +517,7 @@ class _QueuedGotEvidencePhoto {
   final String plotId;
   final String stage;
   final String category;
+  final String? offTypeDetailId;
   final int rcvNo;
   final String rcvLabel;
   final String uploadedBy;
@@ -529,6 +532,7 @@ class _QueuedGotEvidencePhoto {
     required this.plotId,
     required this.stage,
     required this.category,
+    this.offTypeDetailId,
     required this.rcvNo,
     required this.rcvLabel,
     required this.uploadedBy,
@@ -545,6 +549,7 @@ class _QueuedGotEvidencePhoto {
       'plotId': plotId,
       'stage': stage,
       'category': category,
+      'offTypeDetailId': offTypeDetailId,
       'rcvNo': rcvNo,
       'rcvLabel': rcvLabel,
       'uploadedBy': uploadedBy,
@@ -563,6 +568,7 @@ class _QueuedGotEvidencePhoto {
       plotId: json['plotId']?.toString() ?? '-',
       stage: json['stage']?.toString() ?? '-',
       category: json['category']?.toString() ?? '-',
+      offTypeDetailId: json['offTypeDetailId']?.toString(),
       rcvNo: _jsonInt(json['rcvNo']),
       rcvLabel: json['rcvLabel']?.toString() ?? '-',
       uploadedBy: json['uploadedBy']?.toString() ?? '-',

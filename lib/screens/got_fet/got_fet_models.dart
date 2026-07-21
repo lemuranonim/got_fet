@@ -29,6 +29,11 @@ class _GotFetSample {
   int? weekOfResultEstimation;
   String noteTanam;
   String location;
+  String village;
+  String subDistrict;
+  String district;
+  double? latitude;
+  double? longitude;
   double? fieldArea;
   final String statusGot2;
   final String statusGotVeg;
@@ -69,6 +74,11 @@ class _GotFetSample {
     this.weekOfResultEstimation,
     this.noteTanam = '-',
     this.location = '-',
+    this.village = '-',
+    this.subDistrict = '-',
+    this.district = '-',
+    this.latitude,
+    this.longitude,
     this.fieldArea,
     this.statusGot2 = '-',
     this.statusGotVeg = '-',
@@ -218,15 +228,26 @@ extension _GotEvidenceCategoryX on _GotEvidenceCategory {
 class _GotEvidenceSlot {
   final _GotEvidenceCategory category;
   final int rcvNo;
+  final String? offTypeDetailId;
+  final String? customLabel;
 
   const _GotEvidenceSlot({
     required this.category,
     required this.rcvNo,
+    this.offTypeDetailId,
+    this.customLabel,
   });
 
-  String get label => '${category.prefix} $rcvNo';
+  String get label =>
+      customLabel ??
+      (offTypeDetailId == null ? '${category.prefix} $rcvNo' : 'OTD $rcvNo');
 
-  String get key => '${category.key}-$rcvNo';
+  String get evidenceCategoryKey =>
+      offTypeDetailId == null ? category.key : 'off_type_detail';
+
+  String get key => offTypeDetailId == null
+      ? '${category.key}-$rcvNo'
+      : 'off_type_detail-$offTypeDetailId-$rcvNo';
 }
 
 class _GotEvidencePhoto {
@@ -236,6 +257,7 @@ class _GotEvidencePhoto {
   final String photoUrl;
   final String uploadedBy;
   final DateTime? uploadedAt;
+  final String? offTypeDetailId;
 
   const _GotEvidencePhoto({
     required this.categoryKey,
@@ -244,9 +266,142 @@ class _GotEvidencePhoto {
     required this.photoUrl,
     required this.uploadedBy,
     required this.uploadedAt,
+    this.offTypeDetailId,
   });
 
-  String get slotKey => '$categoryKey-$rcvNo';
+  String get slotKey => offTypeDetailId == null
+      ? '$categoryKey-$rcvNo'
+      : 'off_type_detail-$offTypeDetailId-$rcvNo';
+}
+
+class _VillageCoordinate {
+  final String region;
+  final String district;
+  final String subDistrict;
+  final String village;
+  final double latitude;
+  final double longitude;
+  final int sourceCount;
+
+  const _VillageCoordinate({
+    required this.region,
+    required this.district,
+    required this.subDistrict,
+    required this.village,
+    required this.latitude,
+    required this.longitude,
+    required this.sourceCount,
+  });
+
+  String get key => [region, district, subDistrict, village]
+      .map((part) => part.trim().toLowerCase())
+      .join('|');
+
+  String get locationLabel => [
+        village,
+        subDistrict,
+        district,
+      ].where((part) => part.trim().isNotEmpty && part != '-').join(', ');
+
+  String get coordinateLabel =>
+      '${latitude.toStringAsFixed(6)}, ${longitude.toStringAsFixed(6)}';
+}
+
+enum _GotOffTypeSimilarity {
+  similarFiOrHybrid,
+  notSimilarFiOrHybrid,
+}
+
+extension _GotOffTypeSimilarityX on _GotOffTypeSimilarity {
+  String get label => switch (this) {
+        _GotOffTypeSimilarity.similarFiOrHybrid =>
+          'Mirip dengan FI / hybrid lain',
+        _GotOffTypeSimilarity.notSimilarFiOrHybrid =>
+          'Tidak mirip dengan FI / hybrid lain',
+      };
+
+  String get payload => switch (this) {
+        _GotOffTypeSimilarity.similarFiOrHybrid => 'similar_fi_or_hybrid',
+        _GotOffTypeSimilarity.notSimilarFiOrHybrid =>
+          'not_similar_fi_or_hybrid',
+      };
+
+  static _GotOffTypeSimilarity fromPayload(String value) {
+    return value == 'not_similar_fi_or_hybrid'
+        ? _GotOffTypeSimilarity.notSimilarFiOrHybrid
+        : _GotOffTypeSimilarity.similarFiOrHybrid;
+  }
+}
+
+class _GotOffTypeRule {
+  final String id;
+  final int categoryNo;
+  final String typeCode;
+  final String label;
+
+  const _GotOffTypeRule({
+    required this.id,
+    required this.categoryNo,
+    required this.typeCode,
+    required this.label,
+  });
+
+  String get displayLabel => 'Kategori $categoryNo$typeCode - $label';
+
+  static const defaults = [
+    _GotOffTypeRule(
+      id: 'category_1_a',
+      categoryNo: 1,
+      typeCode: 'A',
+      label: 'Mirip FI / Adv',
+    ),
+    _GotOffTypeRule(
+      id: 'category_1_b',
+      categoryNo: 1,
+      typeCode: 'B',
+      label: 'Mirip karakter',
+    ),
+    _GotOffTypeRule(
+      id: 'category_2',
+      categoryNo: 2,
+      typeCode: '',
+      label: 'Karakter berbeda - perlu verifikasi',
+    ),
+    _GotOffTypeRule(
+      id: 'category_3',
+      categoryNo: 3,
+      typeCode: '',
+      label: 'Tidak teridentifikasi - investigasi lanjut',
+    ),
+  ];
+}
+
+class _GotOffTypeDetail {
+  final String id;
+  final String ruleId;
+  final int categoryNo;
+  final String typeCode;
+  final String typeLabel;
+  final String characterNote;
+  final _GotOffTypeSimilarity similarity;
+  final String referenceHybrid;
+  final int requiredPhotoCount;
+
+  const _GotOffTypeDetail({
+    required this.id,
+    required this.ruleId,
+    required this.categoryNo,
+    required this.typeCode,
+    required this.typeLabel,
+    required this.characterNote,
+    required this.similarity,
+    required this.referenceHybrid,
+    required this.requiredPhotoCount,
+  });
+
+  String get title => typeCode.trim().isEmpty
+      ? 'Kategori $categoryNo - $typeLabel'
+      : 'Kategori $categoryNo$typeCode - $typeLabel';
 }
 
 class _FetObservationResult {
