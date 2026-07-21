@@ -84,6 +84,7 @@ class GotFetService {
     double? latitude,
     double? longitude,
     double? fieldArea,
+    String? fieldAreaNote,
     String? statusSample,
   }) async {
     await _supabase.from(samplesTable).update({
@@ -99,6 +100,7 @@ class GotFetService {
       'latitude': latitude,
       'longitude': longitude,
       'field_area': fieldArea,
+      'field_area_note': fieldAreaNote,
       'status_sample': statusSample,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }).eq('batch', batch);
@@ -165,6 +167,7 @@ class GotFetService {
     required double latitude,
     required double longitude,
     required double fieldArea,
+    required String fieldAreaNote,
     required String actor,
   }) async {
     await updateSamplePlanning(
@@ -181,6 +184,7 @@ class GotFetService {
       latitude: latitude,
       longitude: longitude,
       fieldArea: fieldArea,
+      fieldAreaNote: fieldAreaNote,
       statusSample: 'Planted',
     );
     await appendTrackingEvent(

@@ -16,6 +16,7 @@ import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../domain/fet_revision_rules.dart';
+import '../../domain/field_area_rules.dart';
 import '../../domain/got_revision_rules.dart';
 import '../../services/got_fet_service.dart';
 import '../../services/session_manager.dart';
@@ -3802,16 +3803,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 10),
           _buildVillageCoordinateSelector(sample),
           const SizedBox(height: 10),
-          _buildGotDropdown<double>(
-            label: 'Field Area',
-            value: sample.fieldArea,
-            options: _gotFieldAreaOptions,
-            text: _formatArea,
-            onChanged: (value) {
-              setState(() => sample.fieldArea = value);
-              _persistSelectedSamplePlanning();
-            },
-          ),
+          _buildManualFieldAreaField(sample),
           const SizedBox(height: 10),
           _buildGotDropdown<String>(
             label: 'Status Sample',
@@ -3826,6 +3818,173 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildManualFieldAreaField(_GotFetSample sample) {
+    final note = sample.fieldAreaNote.trim();
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => _openFieldAreaEditor(sample),
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'Field Area / Luasan',
+          prefixIcon: Icon(Icons.straighten_rounded),
+          filled: true,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _formatArea(sample.fieldArea),
+                    style: AdvantaText.body1.copyWith(
+                      color: _strongTextColor(context),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  if (note.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      note,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              Icons.edit_rounded,
+              size: 20,
+              color: _gotFetMutedColor(context),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openFieldAreaEditor(_GotFetSample sample) async {
+    final areaController = TextEditingController(
+      text: FieldAreaRules.inputValue(sample.fieldArea),
+    );
+    final noteController = TextEditingController(text: sample.fieldAreaNote);
+    String? validationError;
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Input Luasan Manual'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: areaController,
+                      autofocus: true,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                      ],
+                      decoration: InputDecoration(
+                        labelText: 'Luasan',
+                        hintText: 'Contoh: 0,0125',
+                        suffixText: 'ha',
+                        errorText: validationError,
+                      ),
+                      onChanged: (_) {
+                        if (validationError == null) return;
+                        setDialogState(() => validationError = null);
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Pilihan cepat',
+                      style: AdvantaText.caption.copyWith(
+                        color: _gotFetMutedColor(context),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final option in _gotFieldAreaOptions)
+                          ActionChip(
+                            label: Text(_formatArea(option)),
+                            onPressed: () {
+                              areaController.text =
+                                  FieldAreaRules.inputValue(option);
+                              setDialogState(() => validationError = null);
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: noteController,
+                      maxLines: 3,
+                      maxLength: 250,
+                      decoration: const InputDecoration(
+                        labelText: 'Catatan Luasan (opsional)',
+                        hintText:
+                            'Contoh: luasan efektif setelah dikurangi border',
+                        alignLabelWithHint: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Batal'),
+                ),
+                FilledButton.icon(
+                  icon: const Icon(Icons.save_rounded),
+                  label: const Text('Simpan Luasan'),
+                  onPressed: () async {
+                    final parsed =
+                        FieldAreaRules.parseHectares(areaController.text);
+                    if (parsed == null) {
+                      setDialogState(() {
+                        validationError =
+                            'Masukkan angka luasan lebih besar dari 0.';
+                      });
+                      return;
+                    }
+
+                    setState(() {
+                      sample.fieldArea = parsed;
+                      sample.fieldAreaNote = noteController.text.trim();
+                    });
+                    Navigator.of(dialogContext).pop();
+                    await _persistSelectedSamplePlanning(showResult: true);
+                  },
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    areaController.dispose();
+    noteController.dispose();
   }
 
   Widget _buildPlantingBoundaryCard() {
@@ -6455,6 +6614,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         latitude: sample.latitude,
         longitude: sample.longitude,
         fieldArea: sample.fieldArea,
+        fieldAreaNote: sample.fieldAreaNote,
         statusSample: sample.statusSample,
       );
       if (showResult && mounted) {
@@ -6499,6 +6659,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           latitude: sample.latitude!,
           longitude: sample.longitude!,
           fieldArea: sample.fieldArea!,
+          fieldAreaNote: sample.fieldAreaNote,
           actor: _actorName,
         );
         if (!mounted) return;
@@ -6792,8 +6953,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   String _formatArea(double? value) {
-    if (value == null) return '-';
-    return '${value.toStringAsFixed(3)} ha';
+    return FieldAreaRules.display(value);
   }
 
   String _formatPercent(double value) {
@@ -7033,6 +7193,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
       latitude: _readDouble(row, const ['latitude']),
       longitude: _readDouble(row, const ['longitude']),
       fieldArea: _readDouble(row, const ['field_area', 'Field Area']),
+      fieldAreaNote: _readText(
+        row,
+        const ['field_area_note', 'Field Area Note', 'Catatan Luasan'],
+        fallback: '',
+      ),
       statusGot2: _readText(row, const ['status_got_2', 'Status GOT 2']),
       statusGotVeg: _readText(
         row,

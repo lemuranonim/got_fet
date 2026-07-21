@@ -35,6 +35,7 @@ class _GotFetSample {
   double? latitude;
   double? longitude;
   double? fieldArea;
+  String fieldAreaNote;
   final String statusGot2;
   final String statusGotVeg;
   final String finalStatusGot;
@@ -80,6 +81,7 @@ class _GotFetSample {
     this.latitude,
     this.longitude,
     this.fieldArea,
+    this.fieldAreaNote = '',
     this.statusGot2 = '-',
     this.statusGotVeg = '-',
     this.finalStatusGot = '-',
