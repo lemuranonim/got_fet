@@ -34,6 +34,8 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
   bool _cameraReady = false;
   bool _captureEnabled = false;
   bool _isCapturing = false;
+  double _minimumZoom = 1;
+  double _currentZoom = 1;
 
   _CameraAlignmentMode get _mode => widget.module == _InspectionModule.fet
       ? _CameraAlignmentMode.overhead
@@ -101,6 +103,13 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
       );
       await controller.initialize();
       await _configureAutoFocus(controller);
+      var minimumZoom = 1.0;
+      try {
+        minimumZoom = await controller.getMinZoomLevel();
+        await controller.setZoomLevel(minimumZoom);
+      } catch (_) {
+        minimumZoom = 1;
+      }
       try {
         await controller.setFlashMode(_flashMode);
       } catch (_) {
@@ -114,6 +123,8 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
         _cameras = cameras;
         _controller = controller;
         _cameraReady = true;
+        _minimumZoom = minimumZoom;
+        _currentZoom = minimumZoom;
         _captureEnabled = !_usesStabilityGate;
         _alignedSince = null;
       });
@@ -222,6 +233,23 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
     }
   }
 
+  Future<void> _resetToWide() async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    try {
+      await controller.setZoomLevel(_minimumZoom);
+      if (!mounted) return;
+      setState(() => _currentZoom = _minimumZoom);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Mode sudut terlebar tidak tersedia di kamera ini.'),
+        ),
+      );
+    }
+  }
+
   Future<void> _switchCamera() async {
     if (_cameras.length < 2 || _controller == null) return;
     final currentIndex = _cameras.indexWhere(
@@ -272,7 +300,7 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
             : reading == null
                 ? 'Membaca sensor kemiringan...'
                 : _captureEnabled
-                    ? 'Posisi siap capture'
+                    ? 'Wide ${_currentZoom.toStringAsFixed(1)}x - siap capture'
                     : reading.isAligned
                         ? 'Tahan posisi sampai stabil'
                         : _mode == _CameraAlignmentMode.overhead
@@ -280,7 +308,7 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
                             : 'Tegakkan HP portrait dan luruskan kamera';
     final guidanceText = !_usesStabilityGate
         ? 'Capture tidak dikunci sensor. Fokus otomatis di tengah frame dan stabilitas hanya menjadi panduan.'
-        : 'Ambil foto aktif saat HP datar di atas objek dan stabil.';
+        : 'Gunakan sudut terlebar dan grid 3 x 3. Ambil foto saat HP datar serta stabil.';
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -329,6 +357,14 @@ class _StandaloneCameraScreenState extends State<_StandaloneCameraScreen> {
                       ],
                     ),
                   ),
+                  if (_usesStabilityGate) ...[
+                    _CameraOverlayButton(
+                      tooltip: 'Kembali ke sudut kamera terlebar',
+                      icon: Icons.zoom_out_map_rounded,
+                      onPressed: _cameraReady ? _resetToWide : null,
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   _CameraOverlayButton(
                     tooltip: _flashMode == camera.FlashMode.off
                         ? 'Nyalakan flash'
@@ -566,12 +602,13 @@ class _StandaloneCameraTemplatePainter extends CustomPainter {
       final gridPaint = Paint()
         ..color = frameColor.withAlpha(130)
         ..strokeWidth = 1;
-      for (var i = 1; i < _fetGridColumns; i++) {
-        final x = rect.left + rect.width * i / _fetGridColumns;
+      const gridDivisions = 3;
+      for (var i = 1; i < gridDivisions; i++) {
+        final x = rect.left + rect.width * i / gridDivisions;
         canvas.drawLine(Offset(x, rect.top), Offset(x, rect.bottom), gridPaint);
       }
-      for (var i = 1; i < _fetGridRows; i++) {
-        final y = rect.top + rect.height * i / _fetGridRows;
+      for (var i = 1; i < gridDivisions; i++) {
+        final y = rect.top + rect.height * i / gridDivisions;
         canvas.drawLine(Offset(rect.left, y), Offset(rect.right, y), gridPaint);
       }
     }

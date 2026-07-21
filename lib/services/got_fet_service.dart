@@ -250,6 +250,7 @@ class GotFetService {
     required String lotId,
     required String sampleId,
     required String plotId,
+    required int dap,
     required int replication,
   }) {
     return _supabase
@@ -262,6 +263,7 @@ class GotFetService {
             for (final row in rows)
               if (row['lot_id']?.toString() == lotId &&
                   row['plot_id']?.toString() == plotId &&
+                  row['dap']?.toString() == dap.toString() &&
                   row['replication']?.toString() == replication.toString())
                 Map<String, dynamic>.from(row),
           ];
@@ -284,6 +286,7 @@ class GotFetService {
     required String lotId,
     required String sampleId,
     required String plotId,
+    required int dap,
     required int replication,
   }) async {
     final response = await _supabase
@@ -292,6 +295,7 @@ class GotFetService {
         .eq('lot_id', lotId)
         .eq('sample_id', sampleId)
         .eq('plot_id', plotId)
+        .eq('dap', dap)
         .eq('replication', replication)
         .order('submitted_datetime', ascending: false)
         .limit(1);
@@ -408,6 +412,7 @@ class GotFetService {
     required double emergencePercent,
     required List<String> pointStatuses,
     required String submittedBy,
+    required String remarkStatus,
     File? plotPhoto,
     String? remarks,
   }) async {
@@ -418,7 +423,7 @@ class GotFetService {
             files: [plotPhoto],
             lotId: lotId,
             module: 'fet',
-            replication: 'u$replication',
+            replication: 'd${dap}_u$replication',
           );
 
     final payload = {
@@ -439,6 +444,7 @@ class GotFetService {
           {'point_no': i + 1, 'status': pointStatuses[i]},
       ],
       'plot_photo_url': photoUrls.isEmpty ? null : photoUrls.first,
+      'remark_status': remarkStatus,
       'remarks': remarks,
       'submitted_by': submittedBy,
       'submitted_datetime': submittedAt,
@@ -449,7 +455,7 @@ class GotFetService {
 
     await _supabase.from(fetObservationTable).upsert(
           payload,
-          onConflict: 'lot_id,sample_id,plot_id,replication',
+          onConflict: 'lot_id,sample_id,plot_id,dap,replication',
         );
 
     await _insertPhotoEvidence(
@@ -458,7 +464,7 @@ class GotFetService {
       testType: 'FET',
       module: 'fet',
       plotId: plotId,
-      replication: replication.toString(),
+      replication: 'D$dap-U$replication',
       uploadedBy: submittedBy,
       uploadedAt: submittedAt,
       photoUrls: photoUrls,
@@ -466,9 +472,9 @@ class GotFetService {
 
     await appendTrackingEvent(
       lotId: lotId,
-      status: 'Submitted',
+      status: remarkStatus,
       actor: submittedBy,
-      remarks: 'FET replication $replication submitted',
+      remarks: 'FET Day $dap Ulangan $replication: $remarkStatus',
       eventAt: submittedAt,
     );
   }

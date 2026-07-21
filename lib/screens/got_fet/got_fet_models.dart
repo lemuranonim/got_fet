@@ -419,6 +419,8 @@ class _FetObservationResult {
   final String? plotPhotoUrl;
   final String submittedBy;
   final DateTime? submittedAt;
+  final String remarkStatus;
+  final String? remarks;
   final List<_FetPointStatus> pointStatuses;
 
   const _FetObservationResult({
@@ -436,6 +438,8 @@ class _FetObservationResult {
     required this.plotPhotoUrl,
     required this.submittedBy,
     required this.submittedAt,
+    required this.remarkStatus,
+    required this.remarks,
     required this.pointStatuses,
   });
 }

@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../domain/fet_revision_rules.dart';
 import '../../domain/got_revision_rules.dart';
 import '../../services/got_fet_service.dart';
 import '../../services/session_manager.dart';
@@ -140,8 +141,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   final _selectedSampleIndexNotifier = ValueNotifier<int>(0);
 
   List<_GotFetSample> _samples = [];
-  late List<_FetPointStatus> _replicationOne;
-  late List<_FetPointStatus> _replicationTwo;
+  final Map<int, List<_FetPointStatus>> _fetPointsBySlot = {};
   final List<_GotFetNavEntry> _pageHistory = [];
   StreamSubscription<List<Map<String, dynamic>>>? _sampleSubscription;
   StreamSubscription<List<Map<String, dynamic>>>? _gotObservationSubscription;
@@ -155,6 +155,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
   _InspectionModule _activeModule = _InspectionModule.got;
   int _selectedSampleIndex = 0;
   int _selectedReplication = 1;
+  int _selectedFetDay = FetRevisionRules.observationDays.first;
+  String _selectedFetRemark = 'Done';
   int _reviewSegment = 0;
   int _batchListVisibleCount = _batchListPageSize;
   bool _isSyncing = false;
@@ -195,10 +197,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
   String? _gotOffTypeLoadError;
   String? _villageCoordinateLoadError;
   List<_ReviewTimelineEvent> _reviewTimelineEvents = [];
-  final Map<int, File> _fetPlotPhotosByReplication = {};
-  final Map<int, _SmartPhotoMetadata> _fetPlotMetadataByReplication = {};
-  final Map<int, _FetAutoDetectionResult> _fetAutoDetectionByReplication = {};
-  int? _analyzingFetReplication;
+  final Map<int, File> _fetPlotPhotosBySlot = {};
+  final Map<int, File> _fetAnalysisPhotosBySlot = {};
+  final Map<int, _SmartPhotoMetadata> _fetPlotMetadataBySlot = {};
+  final Map<int, _FetAutoDetectionResult> _fetAutoDetectionBySlot = {};
+  int? _analyzingFetSlot;
   _FetObservationResult? _latestFetObservation;
   _SmartPhotoStatus _smartPhotoStatus = const _SmartPhotoStatus();
 
@@ -209,8 +212,14 @@ class _GotFetScreenState extends State<GotFetScreen> {
     _loadSamplesFromDatabase();
     unawaited(_loadOffTypeRules());
     unawaited(_initializeSmartPhotoPipeline());
-    _replicationOne = _initialFetPoints();
-    _replicationTwo = _initialFetPoints();
+    for (final day in FetRevisionRules.observationDays) {
+      for (final replication in const [1, 2]) {
+        _fetPointsBySlot[FetRevisionRules.slotKey(
+          day: day,
+          replication: replication,
+        )] = _initialFetPoints();
+      }
+    }
   }
 
   @override
@@ -284,7 +293,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   String get _activeModuleSubtitle => _activeModule == _InspectionModule.got
       ? 'Fitur tanam, foto evidence, vegetatif, generative, dan review GOT'
-      : 'Fitur plot scanner, analisa titik tanam, input, dan review FET';
+      : 'Fitur data tanam, Observasi Day 7/11, kamera wide, analisa, dan review FET';
 
   String get _activeModuleLogo => _activeModule == _InspectionModule.got
       ? _GotFetAssets.gotLogo
@@ -355,19 +364,33 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  int get _currentFetSlotKey => FetRevisionRules.slotKey(
+        day: _selectedFetDay,
+        replication: _selectedReplication,
+      );
+
+  int _fetSlotKeyFor(int replication, {int? day}) {
+    return FetRevisionRules.slotKey(
+      day: day ?? _selectedFetDay,
+      replication: replication,
+    );
+  }
+
   List<_FetPointStatus> get _currentReplication =>
-      _selectedReplication == 1 ? _replicationOne : _replicationTwo;
+      _fetPointsBySlot.putIfAbsent(_currentFetSlotKey, _initialFetPoints);
 
   String get _fetPlotId => 'F1 - U$_selectedReplication';
 
-  File? get _currentFetPlotPhoto =>
-      _fetPlotPhotosByReplication[_selectedReplication];
+  File? get _currentFetPlotPhoto => _fetPlotPhotosBySlot[_currentFetSlotKey];
+
+  File? get _currentFetAnalysisPhoto =>
+      _fetAnalysisPhotosBySlot[_currentFetSlotKey] ?? _currentFetPlotPhoto;
 
   _SmartPhotoMetadata? get _currentFetPlotPhotoMetadata =>
-      _fetPlotMetadataByReplication[_selectedReplication];
+      _fetPlotMetadataBySlot[_currentFetSlotKey];
 
   double _currentFetPhotoAspectRatio() {
-    final result = _fetAutoDetectionByReplication[_selectedReplication];
+    final result = _fetAutoDetectionBySlot[_currentFetSlotKey];
     if (result != null && result.sourceWidth > 0 && result.sourceHeight > 0) {
       return result.sourceWidth / result.sourceHeight;
     }
@@ -589,7 +612,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
       _fetResultLabel == 'PASS' ? AdvantaColors.success : AdvantaColors.error;
 
   List<_FetPointStatus> _fetPointsForReplication(int replication) {
-    return replication == 1 ? _replicationOne : _replicationTwo;
+    return _fetPointsBySlot.putIfAbsent(
+      _fetSlotKeyFor(replication),
+      _initialFetPoints,
+    );
   }
 
   int _fetOpenItemsForReplication(int replication) {
@@ -605,13 +631,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   bool _fetPhotoReadyForReplication(int replication) {
-    return _fetPlotPhotosByReplication[replication] != null ||
+    return _fetPlotPhotosBySlot[_fetSlotKeyFor(replication)] != null ||
         (_selectedReplication == replication &&
+            _latestFetObservation?.dap == _selectedFetDay &&
             _latestFetObservation?.plotPhotoUrl != null);
   }
 
   bool _fetSubmittedForReplication(int replication) {
-    return _selectedReplication == replication && _latestFetObservation != null;
+    return _selectedReplication == replication &&
+        _latestFetObservation?.dap == _selectedFetDay;
   }
 
   bool get _gotPlanningReady => _samplePlantingReady(_selectedSample);
@@ -1296,6 +1324,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       sample.lotId,
       sample.sampleId,
       _fetPlotId,
+      _selectedFetDay,
       _selectedReplication,
     ].join('|');
     if (_fetObservationWatchKey == watchKey) return;
@@ -1311,6 +1340,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       lotId: sample.lotId,
       sampleId: sample.sampleId,
       plotId: _fetPlotId,
+      dap: _selectedFetDay,
       replication: _selectedReplication,
     )
         .listen(
@@ -1333,6 +1363,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         lotId: sample.lotId,
         sampleId: sample.sampleId,
         plotId: _fetPlotId,
+        dap: _selectedFetDay,
         replication: _selectedReplication,
       );
       if (!mounted || _fetObservationWatchKey != watchKey) return;
@@ -1345,10 +1376,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   void _applyFetObservationRow(Map<String, dynamic>? row) {
     final result = row == null ? null : _fetObservationFromRow(row);
+    _setControllerText(_fetNoteController, result?.remarks ?? '');
     setState(() {
       _latestFetObservation = result;
+      _selectedFetRemark = result?.remarkStatus ?? 'Done';
       if (result != null && result.pointStatuses.length == _fetGridPointCount) {
-        _replaceFetPoints(result.replication, result.pointStatuses);
+        _replaceFetPoints(
+          result.replication,
+          result.pointStatuses,
+          day: result.dap,
+        );
       }
     });
   }
@@ -1369,6 +1406,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
       plotPhotoUrl: _readNullableText(row, const ['plot_photo_url']),
       submittedBy: _readText(row, const ['submitted_by']),
       submittedAt: _readDate(row, const ['submitted_datetime']),
+      remarkStatus: _readText(
+        row,
+        const ['remark_status'],
+        fallback: 'Done',
+      ),
+      remarks: _readNullableText(row, const ['remarks']),
       pointStatuses: _readFetPointStatuses(row),
     );
   }
@@ -1619,6 +1662,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
   List<_BatchQuickAction> _quickActionsForModule(String module) {
     if (module == 'FET') {
       return const [
+        _BatchQuickAction(
+          label: 'Data Tanam',
+          subtitle: 'Input tanggal dan detail tanam FET',
+          icon: Icons.edit_calendar_rounded,
+          page: _GotFetPage.gotPlantingData,
+        ),
         _BatchQuickAction(
           label: 'Foto Plot',
           subtitle: 'Buka scanner/foto plot FET',
@@ -1876,7 +1925,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return switch (_page) {
       _GotFetPage.home => 'Digital $_activeModuleCode',
       _GotFetPage.lotTracking => 'Lot Tracking',
-      _GotFetPage.gotPlantingData => 'GOT - Data Tanam',
+      _GotFetPage.gotPlantingData => '$_activeModuleCode - Data Tanam',
       _GotFetPage.gotPhoto => 'GOT Photo',
       _GotFetPage.gotInput => 'GOT - $_gotObservationStageLabel',
       _GotFetPage.fetPhoto => 'FET Plot Scanner',
@@ -1912,7 +1961,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   String? _moduleForPage(_GotFetPage page) {
     return switch (page) {
-      _GotFetPage.gotPlantingData ||
+      _GotFetPage.gotPlantingData => _activeModuleCode,
       _GotFetPage.gotPhoto ||
       _GotFetPage.gotInput ||
       _GotFetPage.gotReview =>
@@ -2165,6 +2214,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
                   ]
                 : [
                     _MetricData(
+                      'Data Tanam',
+                      activeSampleIndexes
+                          .where(
+                              (index) => _samplePlantingReady(_samples[index]))
+                          .length
+                          .toString(),
+                      Icons.edit_calendar_rounded,
+                      AdvantaColors.primaryGreen,
+                    ),
+                    _MetricData(
                       'Observasi Due',
                       summary.overdue.toString(),
                       Icons.event_busy_rounded,
@@ -2196,14 +2255,23 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _buildMainMenuGrid(),
           const SizedBox(height: 18),
           _WorkflowSummary(
-            steps: const [
-              ('Sample', Icons.description_rounded),
-              ('Data Tanam', Icons.edit_calendar_rounded),
-              ('Vegetatif', Icons.grass_rounded),
-              ('Generative', Icons.local_florist_rounded),
-              ('Review', Icons.assignment_turned_in_rounded),
-              ('Selesai', Icons.verified_rounded),
-            ],
+            steps: _activeModule == _InspectionModule.got
+                ? const [
+                    ('Sample', Icons.description_rounded),
+                    ('Data Tanam', Icons.edit_calendar_rounded),
+                    ('Vegetatif', Icons.grass_rounded),
+                    ('Generative', Icons.local_florist_rounded),
+                    ('Review', Icons.assignment_turned_in_rounded),
+                    ('Selesai', Icons.verified_rounded),
+                  ]
+                : const [
+                    ('Sample', Icons.description_rounded),
+                    ('Data Tanam', Icons.edit_calendar_rounded),
+                    ('Day 7', Icons.filter_7_rounded),
+                    ('Day 11', Icons.calendar_view_week_rounded),
+                    ('Remarks', Icons.notes_rounded),
+                    ('Selesai', Icons.verified_rounded),
+                  ],
           ),
         ],
       ),
@@ -2236,6 +2304,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
             ),
           ]
         : [
+            _MenuAction(
+              'Data Tanam',
+              'Input proses tanam',
+              Icons.edit_calendar_rounded,
+              _GotFetPage.gotPlantingData,
+              logoAsset: _GotFetAssets.fetLogo,
+            ),
             _MenuAction(
               'Plot Scanner',
               'Foto plot 10x10',
@@ -2625,15 +2700,24 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   Widget _buildFetWorkflowCard() {
     return _WorkflowProgressCard(
-      title: 'Alur FET U$_selectedReplication',
-      subtitle: _fetSubmittedReady
-          ? 'Hasil ulangan ini sudah tersimpan untuk review'
-          : _fetCheckReady
-              ? 'Kroscek selesai, lanjut submit hasil'
-              : 'Ambil foto plot lalu kroscek 100 titik',
+      title: 'Alur FET Day $_selectedFetDay • U$_selectedReplication',
+      subtitle: !_gotPlanningReady
+          ? 'Lengkapi Data Tanam sebelum memulai observasi FET'
+          : _fetSubmittedReady
+              ? 'Hasil Day $_selectedFetDay ulangan ini sudah tersimpan'
+              : _fetCheckReady
+                  ? 'Kroscek selesai, lanjut submit hasil'
+                  : 'Ambil foto plot lalu kroscek 100 titik',
       steps: [
         _WorkflowStepData(
-          label: 'Foto',
+          label: 'Tanam',
+          detail: _gotPlanningReady ? 'Lengkap' : 'Belum lengkap',
+          icon: Icons.edit_calendar_rounded,
+          done: _gotPlanningReady,
+          active: _page == _GotFetPage.gotPlantingData,
+        ),
+        _WorkflowStepData(
+          label: 'Foto D$_selectedFetDay',
           detail: _fetPhotoReady ? 'Siap' : 'Belum ada',
           icon: Icons.camera_alt_rounded,
           done: _fetPhotoReady,
@@ -2650,7 +2734,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ),
         _WorkflowStepData(
           label: 'Submit',
-          detail: _fetSubmittedReady ? 'Tersimpan' : 'Belum submit',
+          detail: _fetSubmittedReady ? _selectedFetRemark : 'Belum submit',
           icon: Icons.send_rounded,
           done: _fetSubmittedReady,
           active: _page == _GotFetPage.fetInput,
@@ -2667,7 +2751,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildGotPlantingDataPage() {
-    if (!_hasSamplesForModule('GOT')) {
+    final module = _activeModuleCode;
+    if (!_hasSamplesForModule(module)) {
       return _buildSampleRequiredPage();
     }
 
@@ -2675,16 +2760,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSamplePicker(module: 'GOT'),
+          _buildSamplePicker(module: module),
           const SizedBox(height: 12),
-          const _ModuleStrip(
-            logoAsset: _GotFetAssets.gotLogo,
-            title: 'Data Tanam GOT',
+          _ModuleStrip(
+            logoAsset:
+                module == 'FET' ? _GotFetAssets.fetLogo : _GotFetAssets.gotLogo,
+            title: 'Data Tanam $module',
             subtitle:
-                'Khusus input proses tanam sampai data tanam dinyatakan lengkap',
+                'Input, tampilkan, dan hubungkan data tanam ke observasi $module',
           ),
           const SizedBox(height: 12),
-          _buildGotWorkflowCard(),
+          module == 'FET' ? _buildFetWorkflowCard() : _buildGotWorkflowCard(),
           const SizedBox(height: 12),
           _buildLotIdentityCard(
             extraRows: [
@@ -2823,8 +2909,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildFetWorkflowCard(),
           const SizedBox(height: 12),
+          _buildFetObservationDaySelector(),
+          const SizedBox(height: 12),
           _GuidanceBanner(
-            text: 'Posisikan seluruh plot 10x10 terfoto jelas',
+            text:
+                'Gunakan mode wide dan grid 3 x 3 agar seluruh plot 10 x 10 masuk frame tanpa mengambil foto dari posisi terlalu tinggi.',
             color: AdvantaColors.success,
           ),
           const SizedBox(height: 10),
@@ -2905,6 +2994,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildFetWorkflowCard(),
           const SizedBox(height: 12),
+          _buildFetObservationDaySelector(),
+          const SizedBox(height: 12),
           _buildReplicationSelector(),
           const SizedBox(height: 14),
           _buildFetAutoDetectionCard(),
@@ -2961,12 +3052,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildFetWorkflowCard(),
           const SizedBox(height: 12),
+          _buildFetObservationDaySelector(),
+          const SizedBox(height: 12),
           _buildReplicationSelector(),
           const SizedBox(height: 12),
           _buildLotIdentityCard(
             extraRows: [
+              ('Planting Date', _formatDate(_selectedSample.plantingDate)),
               ('Plot', _fetPlotId),
-              ('DAP', '7'),
+              ('DAP', '$_selectedFetDay'),
               ('Ulangan', '$_selectedReplication'),
             ],
           ),
@@ -2975,14 +3069,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildPlotEvidenceCard(),
           const SizedBox(height: 12),
-          _buildNoteBox(controller: _fetNoteController),
+          _buildFetRemarksCard(),
           const SizedBox(height: 16),
           _DualActionBar(
             leftLabel: 'Simpan Draft',
             rightLabel: 'Submit',
             leftIcon: Icons.save_outlined,
             rightIcon: Icons.send_rounded,
-            rightEnabled: !_currentReplicationHasOpenItems && !_isSyncing,
+            rightEnabled: _gotPlanningReady &&
+                _fetPhotoReady &&
+                !_currentReplicationHasOpenItems &&
+                !_isSyncing,
             onLeft: () => _showSnack('Draft FET disimpan lokal.'),
             onRight: _submitFetResult,
           ),
@@ -3048,13 +3145,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildFetWorkflowCard(),
           const SizedBox(height: 12),
+          _buildFetObservationDaySelector(),
+          const SizedBox(height: 12),
           _buildReplicationSelector(),
           const SizedBox(height: 12),
           _buildLotIdentityCard(
             extraRows: [
               ('Batch', _selectedSample.batch),
+              ('Planting Date', _formatDate(_selectedSample.plantingDate)),
               ('Plot', _fetPlotId),
-              ('DAP', '7'),
+              ('DAP', '$_selectedFetDay'),
               ('Ulangan', '$_selectedReplication'),
             ],
           ),
@@ -3647,7 +3747,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Input Tim GOT',
+          Text('Input Tim $_activeModuleCode',
               style: AdvantaText.heading3.copyWith(
                 color: _strongTextColor(context),
               )),
@@ -3672,6 +3772,22 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _InfoRow(
               label: 'Week of Result Est.',
               value: sample.weekOfResultEstimation?.toString() ?? '-'),
+          if (_activeModule == _InspectionModule.fet) ...[
+            const SizedBox(height: 8),
+            _InfoRow(
+              label: 'Jadwal Observasi Day 7',
+              value: _formatDate(
+                sample.plantingDate?.add(const Duration(days: 7)),
+              ),
+            ),
+            const SizedBox(height: 8),
+            _InfoRow(
+              label: 'Jadwal Observasi Day 11',
+              value: _formatDate(
+                sample.plantingDate?.add(const Duration(days: 11)),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           _buildGotDropdown<String>(
             label: 'Note Tanam',
@@ -3738,7 +3854,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Halaman ini hanya menyimpan tanggal tanam, lokasi, field area, status sample, dan estimasi hasil. Submit hasil GOT dilakukan dari menu Vegetatif atau Generative.',
+            _activeModule == _InspectionModule.fet
+                ? 'Data tanam ini menjadi acuan jadwal Observasi Day 7 dan Day 11. Foto serta hasil FET baru dapat diproses setelah data tanam lengkap.'
+                : 'Halaman ini menyimpan tanggal tanam, lokasi, field area, status sample, dan estimasi hasil. Submit GOT dilakukan dari menu Vegetatif atau Generative.',
             style: AdvantaText.body2.copyWith(
               color: _gotFetMutedColor(context),
               height: 1.35,
@@ -4245,8 +4363,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final fetMetadata = _currentFetPlotPhotoMetadata;
     final fetSummary = module == 'FET' && fetMetadata != null
         ? fetMetadata.warnings.isEmpty
-            ? 'Foto plot lolos smart check'
-            : 'Cek plot: ${fetMetadata.warnings.join(', ')}'
+            ? 'Watermark Lot & Ulangan tercetak • foto lolos smart check'
+            : 'Watermark tercetak • cek plot: ${fetMetadata.warnings.join(', ')}'
         : null;
 
     return _PanelCard(
@@ -4931,6 +5049,111 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Widget _buildFetObservationDaySelector() {
+    final plantingDate = _selectedSample.plantingDate;
+    final observationDate = plantingDate?.add(Duration(days: _selectedFetDay));
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.calendar_view_week_rounded,
+                color: AdvantaColors.primaryGreen,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Detail Observasi FET',
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: 'Day $_selectedFetDay',
+                color: AdvantaColors.primaryGreen,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            observationDate == null
+                ? 'Lengkapi Planting Date untuk menampilkan jadwal observasi.'
+                : 'Jadwal berdasarkan Planting Date: ${_formatDate(observationDate)}',
+            style: _mutedTextStyle(context),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<int>(
+              segments: const [
+                ButtonSegment<int>(
+                  value: 7,
+                  label: Text('Observasi Day 7'),
+                ),
+                ButtonSegment<int>(
+                  value: 11,
+                  label: Text('Observasi Day 11'),
+                ),
+              ],
+              selected: {_selectedFetDay},
+              showSelectedIcon: false,
+              onSelectionChanged: (selection) {
+                final day = selection.first;
+                if (day == _selectedFetDay) return;
+                _setControllerText(_fetNoteController, '');
+                setState(() {
+                  _selectedFetDay = day;
+                  _selectedFetRemark = 'Done';
+                  _latestFetObservation = null;
+                });
+                _queueSelectedFetObservationSync();
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFetRemarksCard() {
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Remarks',
+            style: AdvantaText.heading3.copyWith(
+              color: _strongTextColor(context),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _buildGotDropdown<String>(
+            label: 'Status Remarks',
+            value: _selectedFetRemark,
+            options: FetRevisionRules.remarkOptions,
+            text: (value) => value,
+            onChanged: (value) => setState(() => _selectedFetRemark = value),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _fetNoteController,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Catatan Remarks',
+              hintText: 'Tambahkan penjelasan Retest, Resampling, atau Done',
+              prefixIcon: Icon(Icons.notes_rounded),
+              filled: true,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildReplicationSelector() {
     return _PanelCard(
       child: Column(
@@ -4958,7 +5181,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Konteks Ulangan FET',
+                      'Konteks Day $_selectedFetDay • Ulangan FET',
                       style: AdvantaText.bodyBold.copyWith(
                         color: _strongTextColor(context),
                       ),
@@ -4976,7 +5199,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 ),
               ),
               _StatusPill(
-                label: 'Aktif U$_selectedReplication',
+                label: 'D$_selectedFetDay • U$_selectedReplication',
                 color: AdvantaColors.primaryGreen,
               ),
             ],
@@ -5002,10 +5225,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
               onSelectionChanged: (selection) {
                 final nextReplication = selection.first;
                 if (nextReplication == _selectedReplication) return;
-                setState(() => _selectedReplication = nextReplication);
+                _setControllerText(_fetNoteController, '');
+                setState(() {
+                  _selectedReplication = nextReplication;
+                  _selectedFetRemark = 'Done';
+                  _latestFetObservation = null;
+                });
                 _queueSelectedFetObservationSync();
                 _showSnack(
-                  'Aktif di Ulangan $nextReplication. Foto, kroscek, input, dan review ikut berpindah.',
+                  'Aktif di Day $_selectedFetDay Ulangan $nextReplication. Foto, hasil, dan remarks ikut berpindah.',
                 );
               },
             ),
@@ -5032,9 +5260,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildFetAutoDetectionCard() {
-    final result = _fetAutoDetectionByReplication[_selectedReplication];
+    final result = _fetAutoDetectionBySlot[_currentFetSlotKey];
     final hasPhoto = _currentFetPlotPhoto != null;
-    final isAnalyzing = _analyzingFetReplication == _selectedReplication;
+    final isAnalyzing = _analyzingFetSlot == _currentFetSlotKey;
     final statusColor = isAnalyzing
         ? AdvantaColors.warning
         : result == null
@@ -5186,7 +5414,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 ),
               ),
               _StatusPill(
-                label: 'Ulangan $_selectedReplication',
+                label: 'D$_selectedFetDay • U$_selectedReplication',
                 color: AdvantaColors.primaryGreen,
               ),
             ],
@@ -5226,7 +5454,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 color: AdvantaColors.primaryGreen,
               ),
               _StatusPill(
-                label: 'Zoom 4x',
+                label: 'Review zoom maks 4x',
                 color: AdvantaColors.green,
               ),
               _StatusPill(
@@ -5259,7 +5487,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('Hasil Ulangan $_selectedReplication',
+          Text('Hasil Day $_selectedFetDay • Ulangan $_selectedReplication',
               style: AdvantaText.heading3.copyWith(
                 color: _strongTextColor(context),
               )),
@@ -5397,6 +5625,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _InfoRow(label: 'Plot', value: result?.plotId ?? _fetPlotId),
           const SizedBox(height: 8),
           _InfoRow(
+            label: 'Observasi',
+            value:
+                'Day ${result?.dap ?? _selectedFetDay} • Ulangan ${result?.replication ?? _selectedReplication}',
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
             label: 'Data Review',
             value: result == null
                 ? 'Belum ada submit tersimpan'
@@ -5424,6 +5658,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
             value: resultLabel,
             valueColor: resultColor,
           ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Remarks',
+            value: result?.remarkStatus ?? _selectedFetRemark,
+          ),
+          if ((result?.remarks?.trim().isNotEmpty ?? false)) ...[
+            const SizedBox(height: 8),
+            _InfoRow(label: 'Catatan Remarks', value: result!.remarks!),
+          ],
         ],
       ),
     );
@@ -5874,27 +6117,29 @@ class _GotFetScreenState extends State<GotFetScreen> {
   Future<void> _runFetAutoDetectionForCurrentPhoto({
     bool showResult = false,
   }) async {
-    final file = _currentFetPlotPhoto;
-    if (file == null || _analyzingFetReplication != null) return;
+    final file = _currentFetAnalysisPhoto;
+    if (file == null || _analyzingFetSlot != null) return;
+    final slotKey = _currentFetSlotKey;
     final replication = _selectedReplication;
+    final day = _selectedFetDay;
 
-    setState(() => _analyzingFetReplication = replication);
+    setState(() => _analyzingFetSlot = slotKey);
     try {
       final result = await _analyzeFetPlotPhoto(file);
       if (!mounted) return;
       setState(() {
-        _fetAutoDetectionByReplication[replication] = result;
-        _replaceFetPoints(replication, result.pointStatuses);
-        if (_analyzingFetReplication == replication) {
-          _analyzingFetReplication = null;
+        _fetAutoDetectionBySlot[slotKey] = result;
+        _replaceFetPoints(replication, result.pointStatuses, day: day);
+        if (_analyzingFetSlot == slotKey) {
+          _analyzingFetSlot = null;
         }
       });
       if (showResult) _showFetAutoDetectionSnack(result);
     } catch (error) {
       if (!mounted) return;
       setState(() {
-        if (_analyzingFetReplication == replication) {
-          _analyzingFetReplication = null;
+        if (_analyzingFetSlot == slotKey) {
+          _analyzingFetSlot = null;
         }
       });
       if (showResult) {
@@ -5903,17 +6148,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
     }
   }
 
-  void _replaceFetPoints(int replication, List<_FetPointStatus> points) {
+  void _replaceFetPoints(
+    int replication,
+    List<_FetPointStatus> points, {
+    int? day,
+  }) {
     final normalized = _initialFetPoints();
     final copyLength = math.min(points.length, _fetGridPointCount);
     for (var index = 0; index < copyLength; index++) {
       normalized[index] = points[index];
     }
-    if (replication == 1) {
-      _replicationOne = normalized;
-    } else {
-      _replicationTwo = normalized;
-    }
+    _fetPointsBySlot[_fetSlotKeyFor(replication, day: day)] = normalized;
   }
 
   void _showFetAutoDetectionSnack(_FetAutoDetectionResult result) {
@@ -6059,12 +6304,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
     ImageSource source, {
     bool openAnalysisAfterPick = false,
   }) async {
+    if (!_gotPlanningReady) {
+      _showSnack('Lengkapi dan simpan Data Tanam sebelum mengambil foto FET.');
+      return;
+    }
     try {
       final image = source == ImageSource.camera
           ? await _captureWithStandaloneCamera(
               module: _InspectionModule.fet,
-              title: 'Plot FET Ulangan $_selectedReplication',
-              subtitle: 'Sejajarkan seluruh plot 10 x 10',
+              title:
+                  'Plot FET Day $_selectedFetDay • Ulangan $_selectedReplication',
+              subtitle: 'Mode wide • sejajarkan plot pada grid 3 x 3',
             )
           : await _imagePicker.pickImage(
               source: source,
@@ -6079,27 +6329,31 @@ class _GotFetScreenState extends State<GotFetScreen> {
           lotId: _selectedSample.lotId,
           sampleId: _selectedSample.sampleId,
           plotId: _fetPlotId,
-          stage: 'Replication $_selectedReplication',
-          label: 'Plot U$_selectedReplication',
+          stage: 'Day $_selectedFetDay',
+          replication: _selectedReplication,
+          label: 'Plot D$_selectedFetDay U$_selectedReplication',
           source: source == ImageSource.camera ? 'camera' : 'gallery',
           actor: _actorName,
         ),
       );
       if (!mounted) return;
       final replication = _selectedReplication;
+      final day = _selectedFetDay;
+      final slotKey = _currentFetSlotKey;
       setState(() {
-        _fetPlotPhotosByReplication[replication] = prepared.file;
-        _fetPlotMetadataByReplication[replication] = prepared.metadata;
-        _fetAutoDetectionByReplication.remove(replication);
-        _replaceFetPoints(replication, _initialFetPoints());
-        _analyzingFetReplication = replication;
+        _fetPlotPhotosBySlot[slotKey] = prepared.file;
+        _fetAnalysisPhotosBySlot[slotKey] = prepared.analysisFile;
+        _fetPlotMetadataBySlot[slotKey] = prepared.metadata;
+        _fetAutoDetectionBySlot.remove(slotKey);
+        _replaceFetPoints(replication, _initialFetPoints(), day: day);
+        _analyzingFetSlot = slotKey;
       });
 
       _FetAutoDetectionResult? detectionResult;
       Object? detectionError;
       try {
         detectionResult = await _analyzeFetPlotPhoto(
-          prepared.file,
+          prepared.analysisFile,
         );
       } catch (error) {
         detectionError = error;
@@ -6107,11 +6361,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
       if (!mounted) return;
       setState(() {
         if (detectionResult != null) {
-          _fetAutoDetectionByReplication[replication] = detectionResult;
-          _replaceFetPoints(replication, detectionResult.pointStatuses);
+          _fetAutoDetectionBySlot[slotKey] = detectionResult;
+          _replaceFetPoints(
+            replication,
+            detectionResult.pointStatuses,
+            day: day,
+          );
         }
-        if (_analyzingFetReplication == replication) {
-          _analyzingFetReplication = null;
+        if (_analyzingFetSlot == slotKey) {
+          _analyzingFetSlot = null;
         }
       });
 
@@ -6308,13 +6566,22 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Future<void> _submitFetResult() async {
+    if (!_gotPlanningReady) {
+      _showSnack('Lengkapi dan simpan Data Tanam sebelum submit FET.');
+      return;
+    }
+    if (!_fetPhotoReady) {
+      _showSnack('Foto FET Day $_selectedFetDay belum tersedia.');
+      return;
+    }
     if (_currentReplicationHasOpenItems) {
       _showSnack('Selesaikan titik review/tidak terbaca sebelum submit.');
       return;
     }
 
     await _runBackendAction(
-      successMessage: 'FET result ${_selectedSample.lotId} submitted.',
+      successMessage:
+          'FET Day $_selectedFetDay Ulangan $_selectedReplication: $_selectedFetRemark.',
       action: () async {
         await _gotFetService.submitFetObservation(
           lotId: _selectedSample.lotId,
@@ -6322,7 +6589,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           hybrid: _selectedSample.hybrid,
           plotId: _fetPlotId,
           replication: _selectedReplication,
-          dap: 7,
+          dap: _selectedFetDay,
           totalPoints: _currentReplication.length,
           grownCount: _currentReplicationGrown,
           notGrownCount: _currentReplicationNotGrown,
@@ -6333,17 +6600,20 @@ class _GotFetScreenState extends State<GotFetScreen> {
             for (final point in _currentReplication) _fetStatusPayload(point),
           ],
           submittedBy: _actorName,
+          remarkStatus: _selectedFetRemark,
           plotPhoto: _currentFetPlotPhoto,
-          remarks: _remarksWithManualContext(_fetNoteController),
+          remarks: _optionalText(_fetNoteController),
         );
+        final sampleStatus =
+            _selectedFetRemark == 'Done' ? 'FET Submitted' : _selectedFetRemark;
         await _gotFetService.updateSampleStatus(
           batch: _selectedSample.batch,
-          status: 'Submitted',
+          status: sampleStatus,
         );
         if (!mounted) return;
         setState(() {
-          _selectedSample.status = 'Submitted';
-          _selectedSample.statusSample = 'Submitted';
+          _selectedSample.status = sampleStatus;
+          _selectedSample.statusSample = sampleStatus;
         });
       },
     );
