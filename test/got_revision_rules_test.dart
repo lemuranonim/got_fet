@@ -13,11 +13,40 @@ void main() {
     });
   });
 
-  test('Off-Type samples are capped at six plants', () {
-    expect(GotRevisionRules.requiredOffTypeSamples(0), 0);
-    expect(GotRevisionRules.requiredOffTypeSamples(3), 3);
-    expect(GotRevisionRules.requiredOffTypeSamples(6), 6);
-    expect(GotRevisionRules.requiredOffTypeSamples(10), 6);
+  test('Off-Type documentation follows distinct characters, not finding total',
+      () {
+    expect(
+      GotRevisionRules.offTypeDocumentationReady(
+        findingCount: 0,
+        documentedCharacterCount: 0,
+        allPhotoPackagesComplete: true,
+      ),
+      isTrue,
+    );
+    expect(
+      GotRevisionRules.offTypeDocumentationReady(
+        findingCount: 4,
+        documentedCharacterCount: 2,
+        allPhotoPackagesComplete: true,
+      ),
+      isTrue,
+    );
+    expect(
+      GotRevisionRules.offTypeDocumentationReady(
+        findingCount: 10,
+        documentedCharacterCount: 0,
+        allPhotoPackagesComplete: true,
+      ),
+      isFalse,
+    );
+    expect(
+      GotRevisionRules.offTypeDocumentationReady(
+        findingCount: 4,
+        documentedCharacterCount: 2,
+        allPhotoPackagesComplete: false,
+      ),
+      isFalse,
+    );
   });
 
   test('photo package labels and totals follow the observation phase', () {
@@ -33,15 +62,25 @@ void main() {
       'Daun',
       'Keseragaman / hamparan tanaman (landscape)',
     ]);
+    expect(GotRevisionRules.vegetativeTrueTypePhotoLabels, [
+      'Hamparan',
+      'Tanaman utuh',
+    ]);
+    expect(GotRevisionRules.generativeTrueTypePhotoLabels, [
+      'Hamparan',
+      'Tanaman utuh',
+      'Bunga jantan',
+      'Tongkol & Silking',
+      'Akar',
+      'Daun',
+    ]);
     expect(
-      GotRevisionRules.requiredOffTypeSamples(10) *
-          GotRevisionRules.requiredPhasePhotos('Vegetative'),
-      12,
+      GotRevisionRules.trueTypePhotoLabels('Vegetative'),
+      GotRevisionRules.vegetativeTrueTypePhotoLabels,
     );
     expect(
-      GotRevisionRules.requiredOffTypeSamples(10) *
-          GotRevisionRules.requiredPhasePhotos('Final Generative'),
-      36,
+      GotRevisionRules.trueTypePhotoLabels('Final Generative'),
+      GotRevisionRules.generativeTrueTypePhotoLabels,
     );
   });
 

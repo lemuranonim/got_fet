@@ -36,6 +36,8 @@ class _GotFetSample {
   double? longitude;
   double? fieldArea;
   String fieldAreaNote;
+  String landAreaName;
+  String batchLotField;
   final String statusGot2;
   final String statusGotVeg;
   final String finalStatusGot;
@@ -82,6 +84,8 @@ class _GotFetSample {
     this.longitude,
     this.fieldArea,
     this.fieldAreaNote = '',
+    this.landAreaName = '',
+    this.batchLotField = '',
     this.statusGot2 = '-',
     this.statusGotVeg = '-',
     this.finalStatusGot = '-',
@@ -130,8 +134,10 @@ class _MetricData {
   final String value;
   final IconData icon;
   final Color color;
+  final VoidCallback? onTap;
 
-  const _MetricData(this.label, this.value, this.icon, this.color);
+  const _MetricData(this.label, this.value, this.icon, this.color,
+      {this.onTap});
 }
 
 class _WorkflowStepData {
@@ -173,12 +179,14 @@ class _GotFetNavEntry {
   final _GotObservationStage gotStage;
   final int selectedSampleIndex;
 
+  final _GotSampleQueue sampleQueue;
   const _GotFetNavEntry({
     required this.page,
     required this.module,
     required this.reviewSegment,
     required this.gotStage,
     required this.selectedSampleIndex,
+    required this.sampleQueue,
   });
 }
 
@@ -389,6 +397,7 @@ class _GotOffTypeDetail {
   final String referenceHybrid;
   final int requiredPhotoCount;
 
+  final int sortOrder;
   const _GotOffTypeDetail({
     required this.id,
     required this.ruleId,
@@ -399,6 +408,7 @@ class _GotOffTypeDetail {
     required this.similarity,
     required this.referenceHybrid,
     required this.requiredPhotoCount,
+    required this.sortOrder,
   });
 
   String get title => typeCode.trim().isEmpty

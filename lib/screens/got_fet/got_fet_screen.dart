@@ -99,6 +99,17 @@ enum _FetPointStatus { grown, notGrown, review, notReadable }
 
 enum _GotObservationStage { vegetative, finalGenerative }
 
+enum _GotSampleQueue {
+  all,
+  beforePlanting,
+  plantingData,
+  vegetative,
+  generative,
+  generativeInput,
+  requestSample,
+  completed,
+}
+
 enum _InspectionModule { got, fet }
 
 const _fetGridColumns = 10;
@@ -163,6 +174,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   bool _isSyncing = false;
   bool _selectionRebuildQueued = false;
   _GotObservationStage _gotObservationStage = _GotObservationStage.vegetative;
+  _GotSampleQueue _activeSampleQueue = _GotSampleQueue.all;
 
   int _gotTotalObserved = 0;
   int _gotOffType = 0;
@@ -340,18 +352,23 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
     for (final sample in _samples) {
       if (!_sampleSupportsModule(sample, 'GOT')) continue;
-      if (_sampleRequestsNewSample(sample)) {
-        requestSample++;
-      } else if (_sampleFinalConfirmed(sample)) {
-        completed++;
-      } else if (!_samplePlantingReady(sample)) {
-        beforePlanting++;
-      } else if (!_sampleVegetativeSubmitted(sample)) {
-        plantingReady++;
-      } else if (!_sampleGenerativeSubmitted(sample)) {
-        vegetative++;
-      } else {
-        generative++;
+      switch (_gotQueueForSample(sample)) {
+        case _GotSampleQueue.beforePlanting:
+          beforePlanting++;
+        case _GotSampleQueue.plantingData:
+          plantingReady++;
+        case _GotSampleQueue.vegetative:
+          vegetative++;
+        case _GotSampleQueue.generative:
+          generative++;
+        case _GotSampleQueue.requestSample:
+          requestSample++;
+        case _GotSampleQueue.generativeInput:
+          break;
+        case _GotSampleQueue.completed:
+          completed++;
+        case _GotSampleQueue.all:
+          break;
       }
     }
 
@@ -432,12 +449,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
       'parent seed',
       'parent stock',
       'parental',
+      'inbred',
     ]);
     final isCommercial = _containsRuleTerm(allSource, const [
       'commercial',
       'komersial',
       'komersil',
       'cs',
+      'f1',
+      'hybrid commercial',
     ]);
     final isManis = _containsRuleTerm(typeSource, const [
       'manis',
@@ -459,7 +479,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             : null;
     final genderLabel = _gotRuleGenderLabel(genderSource);
 
-    if (isParentSeed && !isCommercial) {
+    if (isParentSeed) {
       if (genderLabel == 'Male') {
         return (
           label: '${productLabel ?? 'Corn'} PS (Male)',
@@ -495,6 +515,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
       return 'Female';
     }
     return null;
+  }
+
+  String get _gotCalculationReference {
+    final rule = _gotPassFailRule;
+    if (rule == null) return 'Master PS/Komersil belum terdeteksi';
+    final classLabel =
+        rule.label.contains('PS') ? 'Parent Seed (PS)' : 'Komersil';
+    return '$classLabel • purity = TrueType ÷ total × 100 • '
+        'batas ${_formatPercent(rule.threshold)}%';
   }
 
   String get _gotPassFailReference {
@@ -574,13 +603,6 @@ class _GotFetScreenState extends State<GotFetScreen> {
     };
   }
 
-  String get _gotSubmittedStatusLabel {
-    return switch (_gotObservationStage) {
-      _GotObservationStage.vegetative => 'Vegetative Submitted',
-      _GotObservationStage.finalGenerative => 'Generative Submitted',
-    };
-  }
-
   Color _gotStageColor(_GotObservationStage stage) {
     return switch (stage) {
       _GotObservationStage.vegetative => AdvantaColors.primaryGreen,
@@ -654,10 +676,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   bool _sampleRequestsNewSample(_GotFetSample sample) {
-    final status = _combinedSampleStatus(sample);
-    return status.contains('request new sample') ||
-        status.contains('resample') ||
-        status.contains('resampling');
+    final workflowStatus = sample.status.toLowerCase();
+    final sampleCondition = sample.statusSample.toLowerCase();
+    final plantingNote = sample.noteTanam.toLowerCase();
+    return workflowStatus.contains('request new sample') ||
+        workflowStatus.contains('resampling') ||
+        sampleCondition == 'request new sample' ||
+        plantingNote.contains('resampling');
   }
 
   bool _sampleVegetativeSubmitted(_GotFetSample sample) {
@@ -697,6 +722,64 @@ class _GotFetScreenState extends State<GotFetScreen> {
     ].join(' ').toLowerCase();
   }
 
+  _GotSampleQueue _gotQueueForSample(_GotFetSample sample) {
+    final status = _combinedSampleStatus(sample);
+    if (_sampleRequestsNewSample(sample)) {
+      return _GotSampleQueue.requestSample;
+    }
+    if (_sampleFinalConfirmed(sample)) return _GotSampleQueue.completed;
+    if (_sampleGenerativeSubmitted(sample) ||
+        status.contains('waiting review')) {
+      return _GotSampleQueue.generative;
+    }
+    if (_sampleVegetativeSubmitted(sample) || status.contains('to obs gen')) {
+      return _GotSampleQueue.generative;
+    }
+    if (status.contains('ready to plant') || status.contains('siap tanam')) {
+      return _GotSampleQueue.plantingData;
+    }
+    if (_samplePlantingReady(sample) ||
+        status.contains('to obs veg') ||
+        status.contains('planted')) {
+      return _GotSampleQueue.vegetative;
+    }
+    return _GotSampleQueue.beforePlanting;
+  }
+
+  bool _sampleMatchesQueue(_GotFetSample sample, _GotSampleQueue queue) {
+    if (queue == _GotSampleQueue.all) return true;
+    final sampleQueue = _gotQueueForSample(sample);
+    if (queue == _GotSampleQueue.generativeInput) {
+      return sampleQueue == _GotSampleQueue.generative &&
+          !_sampleGenerativeSubmitted(sample);
+    }
+    return sampleQueue == queue;
+  }
+
+  String _gotQueueLabel(_GotSampleQueue queue) {
+    return switch (queue) {
+      _GotSampleQueue.all => 'Semua Status',
+      _GotSampleQueue.beforePlanting => 'Belum Planting',
+      _GotSampleQueue.plantingData => 'Ready to Plant / Data Tanam',
+      _GotSampleQueue.vegetative => 'Siap Observasi Vegetatif',
+      _GotSampleQueue.generative => 'Siap Observasi / Review Generatif',
+      _GotSampleQueue.requestSample => 'Request New Sample',
+      _GotSampleQueue.completed => 'Selesai',
+      _GotSampleQueue.generativeInput => 'Siap Input Generatif',
+    };
+  }
+
+  void _selectFirstSampleForActiveQueue(String module) {
+    if (!_hasSamples || module != 'GOT') return;
+    final indexes = _sampleIndexesForModule(
+      module,
+      queue: _activeSampleQueue,
+    );
+    if (indexes.isEmpty || indexes.contains(_selectedSampleIndex)) return;
+    _selectedSampleIndex = indexes.first;
+    _selectedSampleIndexNotifier.value = _selectedSampleIndex;
+  }
+
   bool get _gotInputReady =>
       _hasPersistedGotObservation || _gotTotalObserved > 0;
 
@@ -705,11 +788,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   int get _gotRequiredOffTypePhotosPerSample => _gotOffTypePhotoLabels.length;
 
-  int get _gotRequiredOffTypeSampleCount =>
-      GotRevisionRules.requiredOffTypeSamples(_gotOffType);
-
   int get _gotRequiredOffTypePhotoTotal =>
-      _gotRequiredOffTypeSampleCount * _gotRequiredOffTypePhotosPerSample;
+      _gotOffTypeDetails.length * _gotRequiredOffTypePhotosPerSample;
 
   List<_GotEvidenceSlot> _gotOffTypeSlotsForDetail(
     _GotOffTypeDetail detail,
@@ -738,9 +818,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   bool get _gotOffTypeDetailsReady {
-    if (_gotOffType == 0) return _gotOffTypeDetails.isEmpty;
-    return _gotOffTypeDetails.length == _gotRequiredOffTypeSampleCount &&
-        _gotOffTypeDetails.every(_gotOffTypeDetailPhotosReady);
+    return GotRevisionRules.offTypeDocumentationReady(
+      findingCount: _gotOffType,
+      documentedCharacterCount: _gotOffTypeDetails.length,
+      allPhotoPackagesComplete:
+          _gotOffTypeDetails.every(_gotOffTypeDetailPhotosReady),
+    );
   }
 
   bool get _gotEvidenceReady => _gotOffTypeDetailsReady;
@@ -759,7 +842,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
   bool get _fetSubmittedReady => _latestFetObservation != null;
 
   bool _sampleObservationDone(_GotFetSample sample) {
-    final status = sample.status.toLowerCase();
+    final status = [
+      sample.status,
+      sample.statusGotVeg,
+      sample.finalStatusGot,
+    ].join(' ').toLowerCase();
     return status.contains('submit') ||
         status.contains('approved') ||
         status.contains('confirmed') ||
@@ -770,7 +857,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   bool _sampleFinalConfirmed(_GotFetSample sample) {
-    final status = sample.status.toLowerCase();
+    final status = [
+      sample.status,
+      sample.finalStatusGot,
+    ].join(' ').toLowerCase();
     return status.contains('approved') ||
         status.contains('confirmed') ||
         status.contains('complete') ||
@@ -1307,6 +1397,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       referenceHybrid: _readText(row, const ['reference_hybrid'], fallback: ''),
       requiredPhotoCount:
           math.max(1, _readInt(row, const ['required_photo_count'])),
+      sortOrder: _readInt(row, const ['sort_order']),
     );
   }
 
@@ -1511,6 +1602,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       reviewSegment: _reviewSegment,
       gotStage: _gotObservationStage,
       selectedSampleIndex: _selectedSampleIndex,
+      sampleQueue: _activeSampleQueue,
     );
   }
 
@@ -1523,6 +1615,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           last.module == snapshot.module &&
           last.reviewSegment == snapshot.reviewSegment &&
           last.gotStage == snapshot.gotStage &&
+          last.sampleQueue == snapshot.sampleQueue &&
           last.selectedSampleIndex == snapshot.selectedSampleIndex;
       if (duplicate) return;
     }
@@ -1542,11 +1635,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
     }
   }
 
-  void _openPage(_GotFetPage page, {bool remember = true}) {
+  void _openPage(
+    _GotFetPage page, {
+    bool remember = true,
+    _GotSampleQueue sampleQueue = _GotSampleQueue.all,
+  }) {
     setState(() {
       if (remember) _rememberCurrentPage(page);
       _applyPageContext(page);
+      _activeSampleQueue = sampleQueue;
       _page = page;
+      _selectFirstSampleForActiveQueue(_activeModuleCode);
     });
     _queueSelectedGotObservationSync();
   }
@@ -1590,6 +1689,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         _reviewSegment = previous.reviewSegment;
         _gotObservationStage = previous.gotStage;
         if (_hasSamples) {
+          _activeSampleQueue = previous.sampleQueue;
           _selectedSampleIndex = previous.selectedSampleIndex
               .clamp(
                 0,
@@ -1981,17 +2081,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return testType.contains(module) || testType.contains('GOT + FET');
   }
 
-  List<int> _sampleIndexesForModule(String? module) {
-    if (module == null) {
-      return [for (var i = 0; i < _samples.length; i++) i];
-    }
-
-    final indexes = [
+  List<int> _sampleIndexesForModule(
+    String? module, {
+    _GotSampleQueue queue = _GotSampleQueue.all,
+  }) {
+    return [
       for (var i = 0; i < _samples.length; i++)
-        if (_sampleSupportsModule(_samples[i], module)) i,
+        if ((module == null || _sampleSupportsModule(_samples[i], module)) &&
+            (module?.toUpperCase() != 'GOT' ||
+                _sampleMatchesQueue(_samples[i], queue)))
+          i,
     ];
-
-    return indexes;
   }
 
   bool _hasSamplesForModule(String? module) =>
@@ -2024,7 +2124,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
         _page == _GotFetPage.review ? _activeModuleCode : _moduleForPage(_page);
     final hasRequiredSamples = requiredModule == null
         ? _hasSamples
-        : _hasSamplesForModule(requiredModule);
+        : _sampleIndexesForModule(
+            requiredModule,
+            queue: requiredModule == 'GOT'
+                ? _activeSampleQueue
+                : _GotSampleQueue.all,
+          ).isNotEmpty;
 
     if (_isLoadingSamples && !canRenderWithoutSamples) {
       return const _SampleStatePage(
@@ -2054,11 +2159,27 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildSampleRequiredPage() {
+    final filteredQueueEmpty = _hasSamples &&
+        _activeModule == _InspectionModule.got &&
+        _activeSampleQueue != _GotSampleQueue.all;
     return _PageScaffold(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _buildSampleStatePanel(),
+          if (filteredQueueEmpty)
+            _GuidanceBanner(
+              text:
+                  'Belum ada lot pada antrean ${_gotQueueLabel(_activeSampleQueue)}.',
+              color: AdvantaColors.warning,
+            )
+          else
+            _buildSampleStatePanel(),
+          if (filteredQueueEmpty)
+            OutlinedButton.icon(
+              onPressed: () => _openPage(_GotFetPage.lotTracking),
+              icon: const Icon(Icons.inventory_2_outlined),
+              label: const Text('Lihat Semua Lot'),
+            ),
           const SizedBox(height: 14),
           _ModuleStrip(
             logoAsset: _activeModuleLogo,
@@ -2181,36 +2302,60 @@ class _GotFetScreenState extends State<GotFetScreen> {
                       gotStageSummary.beforePlanting.toString(),
                       Icons.pending_actions_rounded,
                       AdvantaColors.gold,
+                      onTap: () => _openPage(
+                        _GotFetPage.lotTracking,
+                        sampleQueue: _GotSampleQueue.beforePlanting,
+                      ),
                     ),
                     _MetricData(
                       'Data Tanam',
                       gotStageSummary.plantingReady.toString(),
                       Icons.edit_calendar_rounded,
                       AdvantaColors.primaryGreen,
+                      onTap: () => _openPage(
+                        _GotFetPage.lotTracking,
+                        sampleQueue: _GotSampleQueue.plantingData,
+                      ),
                     ),
                     _MetricData(
                       'Observasi Veg',
                       gotStageSummary.vegetative.toString(),
                       Icons.grass_rounded,
                       AdvantaColors.greenDark,
+                      onTap: () => _openPage(
+                        _GotFetPage.lotTracking,
+                        sampleQueue: _GotSampleQueue.vegetative,
+                      ),
                     ),
                     _MetricData(
                       'Observasi Gen',
                       gotStageSummary.generative.toString(),
                       Icons.local_florist_rounded,
                       const Color(0xFF4361EE),
+                      onTap: () => _openPage(
+                        _GotFetPage.lotTracking,
+                        sampleQueue: _GotSampleQueue.generative,
+                      ),
                     ),
                     _MetricData(
                       'Request Sample',
                       gotStageSummary.requestSample.toString(),
                       Icons.change_circle_rounded,
                       AdvantaColors.error,
+                      onTap: () => _openPage(
+                        _GotFetPage.lotTracking,
+                        sampleQueue: _GotSampleQueue.requestSample,
+                      ),
                     ),
                     _MetricData(
                       'Selesai',
                       gotStageSummary.completed.toString(),
                       Icons.verified_rounded,
                       AdvantaColors.success,
+                      onTap: () => _openPage(
+                        _GotFetPage.lotTracking,
+                        sampleQueue: _GotSampleQueue.completed,
+                      ),
                     ),
                   ]
                 : [
@@ -2364,7 +2509,14 @@ class _GotFetScreenState extends State<GotFetScreen> {
         if (action.title == 'Generative') {
           _setGotObservationStage(_GotObservationStage.finalGenerative);
         }
-        _openPage(action.page);
+        final queue = switch (action.title) {
+          'Data Tanam' when _activeModule == _InspectionModule.got =>
+            _GotSampleQueue.plantingData,
+          'Vegetatif' => _GotSampleQueue.vegetative,
+          'Generative' => _GotSampleQueue.generativeInput,
+          _ => _GotSampleQueue.all,
+        };
+        _openPage(action.page, sampleQueue: queue);
       },
     );
   }
@@ -2422,7 +2574,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
     String? module,
     void Function(int sampleIndex, String module)? onBatchTap,
   }) {
-    final indexes = _sampleIndexesForModule(module);
+    final indexes = _sampleIndexesForModule(
+      module,
+      queue: module?.toUpperCase() == 'GOT'
+          ? _activeSampleQueue
+          : _GotSampleQueue.all,
+    );
     var visibleCount = math.min(_batchListVisibleCount, indexes.length);
     final selectedPosition = indexes.indexOf(_selectedSampleIndex);
     if (selectedPosition >= visibleCount) {
@@ -2548,20 +2705,57 @@ class _GotFetScreenState extends State<GotFetScreen> {
       );
     }
 
+    final queueIndexes = _sampleIndexesForModule(
+      _activeModuleCode,
+      queue: _activeModule == _InspectionModule.got
+          ? _activeSampleQueue
+          : _GotSampleQueue.all,
+    );
+    if (queueIndexes.isEmpty) {
+      return _PageScaffold(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _ModuleStrip(
+              logoAsset: _GotFetAssets.appLogo,
+              title: 'Lot Tracking',
+              subtitle: 'Filter: ${_gotQueueLabel(_activeSampleQueue)}',
+            ),
+            const SizedBox(height: 16),
+            _GuidanceBanner(
+              text:
+                  'Belum ada lot pada status ${_gotQueueLabel(_activeSampleQueue)}.',
+              color: AdvantaColors.warning,
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () => _openPage(
+                _GotFetPage.lotTracking,
+                sampleQueue: _GotSampleQueue.all,
+              ),
+              icon: const Icon(Icons.clear_all_rounded),
+              label: const Text('Tampilkan Semua Lot'),
+            ),
+          ],
+        ),
+      );
+    }
+
     return _PageScaffold(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildSamplePicker(module: _activeModuleCode),
           const SizedBox(height: 12),
-          const _ModuleStrip(
+          _ModuleStrip(
             logoAsset: _GotFetAssets.appLogo,
             title: 'Lot Tracking',
             subtitle:
-                'Pantau pengiriman, status sample, dan kesiapan benih sebelum tanam',
+                'Filter: ${_gotQueueLabel(_activeSampleQueue)} • cari lokasi, koordinat, atau status',
           ),
           const SizedBox(height: 16),
-          Text('Daftar Batch Pengiriman', style: _sectionTitle(context)),
+          Text('Daftar Batch • ${_gotQueueLabel(_activeSampleQueue)}',
+              style: _sectionTitle(context)),
           const SizedBox(height: 10),
           _buildBatchListView(
             module: _activeModuleCode,
@@ -2576,11 +2770,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 16),
           _buildShipmentInfoCard(),
           const SizedBox(height: 16),
+          _buildTrackingActionCard(),
+          const SizedBox(height: 16),
           _buildTimelineCard(_selectedSample),
           const SizedBox(height: 16),
           _buildLotReviewActionCard(),
-          const SizedBox(height: 16),
-          _buildTrackingActionCard(),
         ],
       ),
     );
@@ -2629,12 +2823,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                     const SizedBox(height: 12),
                     _buildLotSummaryCard(),
                     const SizedBox(height: 12),
-                    _buildLotReviewActionCard(
-                      onSubmitted: () {
-                        setSheetState(() {});
-                        Navigator.of(sheetContext).pop();
-                      },
-                    ),
+                    _buildShipmentInfoCard(),
                     const SizedBox(height: 12),
                     _buildTrackingActionCard(
                       onConfirmed: () {
@@ -2643,9 +2832,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
                       },
                     ),
                     const SizedBox(height: 12),
-                    _buildShipmentInfoCard(),
-                    const SizedBox(height: 12),
                     _buildTimelineCard(_selectedSample),
+                    const SizedBox(height: 20),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    _buildLotReviewActionCard(
+                      onSubmitted: () {
+                        setSheetState(() {});
+                        Navigator.of(sheetContext).pop();
+                      },
+                    ),
                   ],
                 );
               },
@@ -2823,7 +3019,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           _GuidanceBanner(
             text: _gotOffType == 0
                 ? 'Belum ada temuan Off-Type; tidak ada paket foto sampel yang wajib.'
-                : 'Wajib $_gotRequiredOffTypeSampleCount sampel dari $_gotOffType temuan Off-Type × $_gotRequiredOffTypePhotosPerSample foto untuk $_gotObservationStageLabel = $_gotRequiredOffTypePhotoTotal foto.',
+                : 'Dokumentasikan setiap jenis karakter berbeda dari $_gotOffType temuan. Saat ini ${_gotOffTypeDetails.length} jenis × $_gotRequiredOffTypePhotosPerSample foto = $_gotRequiredOffTypePhotoTotal foto.',
             color: AdvantaColors.success,
           ),
           const SizedBox(height: 12),
@@ -3206,7 +3402,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   Widget _buildSamplePicker({String? module}) {
     final theme = Theme.of(context);
-    final sampleIndexes = _sampleIndexesForModule(module);
+    final sampleIndexes = _sampleIndexesForModule(
+      module,
+      queue: module?.toUpperCase() == 'GOT'
+          ? _activeSampleQueue
+          : _GotSampleQueue.all,
+    );
     final selectedValue = sampleIndexes.contains(_selectedSampleIndex)
         ? _selectedSampleIndex
         : null;
@@ -3275,7 +3476,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Future<void> _openSampleSearchSheet({String? module}) async {
-    final sampleIndexes = _sampleIndexesForModule(module);
+    final sampleIndexes = _sampleIndexesForModule(
+      module,
+      queue: module?.toUpperCase() == 'GOT'
+          ? _activeSampleQueue
+          : _GotSampleQueue.all,
+    );
     if (sampleIndexes.isEmpty) return;
 
     final controller = TextEditingController();
@@ -3287,6 +3493,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
       'Open',
       'Submitted',
       'Approved',
+      'Received',
+      'Ready to Plant',
+      'To Obs. Veg',
+      'To Obs. Gen',
+      'Waiting Review',
     ];
 
     final selectedIndex = await showModalBottomSheet<int>(
@@ -3427,6 +3638,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return [
       sample.lotId,
       sample.sampleId,
+      sample.batchLotField,
+      sample.landAreaName,
       sample.batch,
       sample.hybrid,
       sample.gender,
@@ -3438,6 +3651,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
       sample.status,
       sample.statusSample,
       sample.location,
+      sample.village,
+      sample.subDistrict,
+      sample.district,
+      sample.latitude?.toString() ?? '',
+      sample.longitude?.toString() ?? '',
       sample.flagging,
       sample.reasonTesting,
       sample.noteSample,
@@ -3452,6 +3670,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final searchableStatus = [
       sample.status,
       sample.statusSample,
+      sample.statusGot2,
+      sample.statusGotVeg,
+      sample.finalStatusGot,
       sample.noteTanam,
     ].join(' ').toLowerCase();
 
@@ -3493,6 +3714,19 @@ class _GotFetScreenState extends State<GotFetScreen> {
               Expanded(
                   child: _MiniFact(
                       label: 'Due', value: _dateFormat.format(sample.dueDate))),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child:
+                    _MiniFact(label: 'Status Workflow', value: sample.status),
+              ),
+              Expanded(
+                child: _MiniFact(
+                    label: 'Status Sample', value: sample.statusSample),
+              ),
             ],
           ),
         ],
@@ -3792,6 +4026,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildGotDropdown<String>(
             label: 'Note Tanam',
+            helperText:
+                'Progress pekerjaan tanam: On Process, Done, atau Resampling.',
             value: sample.noteTanam,
             options: _gotNoteTanamOptions,
             text: (value) => value,
@@ -3803,11 +4039,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 10),
           _buildVillageCoordinateSelector(sample),
           const SizedBox(height: 10),
+          _buildFieldIdentitySelector(sample),
+          const SizedBox(height: 10),
           _buildManualFieldAreaField(sample),
           const SizedBox(height: 10),
           _buildGotDropdown<String>(
             label: 'Status Sample',
             value: sample.statusSample,
+            helperText:
+                'Kondisi/iterasi material sample; berbeda dari status workflow lot.',
             options: _gotStatusSampleOptions,
             text: (value) => value,
             onChanged: (value) {
@@ -3818,6 +4058,113 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildFieldIdentitySelector(_GotFetSample sample) {
+    final landName = sample.landAreaName.trim();
+    final fieldBatch = sample.batchLotField.trim();
+
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: () => _openFieldIdentityEditor(sample),
+      child: InputDecorator(
+        decoration: const InputDecoration(
+          labelText: 'Identitas Lahan / Batch Lot Field',
+          helperText:
+              'Nama area boleh dibuat tim GOT; nomor lot pabrik tetap menjadi referensi data.',
+          prefixIcon: Icon(Icons.landscape_rounded),
+          filled: true,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    landName.isEmpty ? 'Nama lahan belum diisi' : landName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AdvantaText.bodyBold.copyWith(
+                      color: _gotFetTextColor(context),
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    fieldBatch.isEmpty
+                        ? 'Batch lot field belum diisi'
+                        : 'Batch field: $fieldBatch',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AdvantaText.caption.copyWith(
+                      color: _gotFetMutedColor(context),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.edit_rounded, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openFieldIdentityEditor(_GotFetSample sample) async {
+    final landController = TextEditingController(text: sample.landAreaName);
+    final batchController = TextEditingController(text: sample.batchLotField);
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Identitas Lahan GOT'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: landController,
+                maxLength: 100,
+                decoration: const InputDecoration(
+                  labelText: 'Nama Lahan / Area',
+                  hintText: 'Contoh: Area Ngantru Utara',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: batchController,
+                maxLength: 80,
+                decoration: const InputDecoration(
+                  labelText: 'Batch Lot Field',
+                  hintText: 'Contoh: GOT-NGANTRU-01',
+                  helperText:
+                      'Dipakai pada nametag field; lot pabrik tetap dipakai untuk proses dan sinkronisasi.',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.save_rounded),
+            label: const Text('Simpan'),
+          ),
+        ],
+      ),
+    );
+    if (saved == true && mounted) {
+      setState(() {
+        sample.landAreaName = landController.text.trim();
+        sample.batchLotField = batchController.text.trim();
+      });
+      await _persistSelectedSamplePlanning(showResult: true);
+    }
+    landController.dispose();
+    batchController.dispose();
   }
 
   Widget _buildManualFieldAreaField(_GotFetSample sample) {
@@ -4039,12 +4386,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   Widget _buildVillageCoordinateSelector(_GotFetSample sample) {
     final hasCoordinate = sample.latitude != null && sample.longitude != null;
+    final displayName = sample.landAreaName.trim().isNotEmpty
+        ? sample.landAreaName.trim()
+        : sample.location;
     final subtitle = _isLoadingVillageCoordinates
         ? 'Memuat Village Coordinate...'
         : _villageCoordinateLoadError != null
             ? 'Gagal memuat: $_villageCoordinateLoadError'
             : hasCoordinate
-                ? '${sample.latitude!.toStringAsFixed(6)}, ${sample.longitude!.toStringAsFixed(6)}'
+                ? '${sample.landAreaName.trim().isEmpty ? '' : '${sample.location} • '}'
+                    '${sample.latitude!.toStringAsFixed(6)}, ${sample.longitude!.toStringAsFixed(6)}'
                 : 'Pilih desa dari master_fields';
 
     return InkWell(
@@ -4063,7 +4414,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    sample.village == '-' ? 'Belum dipilih' : sample.location,
+                    sample.village == '-' ? 'Belum dipilih' : displayName,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
@@ -4180,6 +4531,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   Widget _buildGotDropdown<T>({
     required String label,
     required T? value,
+    String? helperText,
     required List<T> options,
     required String Function(T value) text,
     required ValueChanged<T> onChanged,
@@ -4190,6 +4542,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       decoration: InputDecoration(
         labelText: label,
         filled: true,
+        helperText: helperText,
         fillColor: Theme.of(context).inputDecorationTheme.fillColor,
       ),
       items: [
@@ -4212,7 +4565,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final rows = [
       ('Lot ID', _selectedSample.lotId),
       ('Hybrid', _selectedSample.hybrid),
+      if (_selectedSample.batchLotField.trim().isNotEmpty)
+        ('Batch Lot Field', _selectedSample.batchLotField),
+      if (_selectedSample.landAreaName.trim().isNotEmpty)
+        ('Nama Lahan', _selectedSample.landAreaName),
       ('Category', _selectedSample.category),
+      ('Status Workflow', _selectedSample.status),
       ('Location', _selectedSample.location),
       ...extraRows,
     ];
@@ -4355,6 +4713,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
             onChanged: (value) => _setGotCountFromText('suspicious', value),
           ),
           const Divider(height: 26),
+          _InfoRow(
+            label: 'Formula / Kelas',
+            value: _gotCalculationReference,
+          ),
+          const SizedBox(height: 8),
           _InfoRow(
             label: 'Purity (%)',
             value: _gotCountsValid ? _gotPurity.toStringAsFixed(2) : 'Invalid',
@@ -4772,6 +5135,20 @@ class _GotFetScreenState extends State<GotFetScreen> {
     _GotEvidenceCategory category,
   ) {
     final slotCount = _gotEvidenceSlotCountForCategory(category);
+    if (category == _GotEvidenceCategory.trueType) {
+      if (_gotTrueType <= 0) return const [];
+      final labels =
+          GotRevisionRules.trueTypePhotoLabels(_gotObservationStagePayload);
+      return [
+        for (var index = 0; index < labels.length; index++)
+          _GotEvidenceSlot(
+            category: category,
+            rcvNo: index + 1,
+            customLabel: 'TT1 - ${labels[index]}',
+          ),
+      ];
+    }
+
     return [
       for (var i = 1; i <= slotCount; i++)
         _GotEvidenceSlot(category: category, rcvNo: i),
@@ -4803,7 +5180,6 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildGotOffTypeDetailsCard({bool readOnly = false}) {
-    final expected = _gotRequiredOffTypeSampleCount;
     final actual = _gotOffTypeDetails.length;
     final ready = _gotOffTypeDetailsReady;
     final color = ready ? AdvantaColors.success : AdvantaColors.warning;
@@ -4824,14 +5200,14 @@ class _GotFetScreenState extends State<GotFetScreen> {
                   ),
                 ),
               ),
-              _StatusPill(label: '$actual/$expected sampel', color: color),
+              _StatusPill(label: '$actual jenis karakter', color: color),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            expected == 0
+            _gotOffType == 0
                 ? 'Tidak ada Off-Type pada hasil pengamatan.'
-                : 'Dokumentasikan $expected sampel dari $_gotOffType temuan. Setiap sampel wajib memiliki kategori, catatan karakter, penilaian kemiripan, dan $_gotRequiredOffTypePhotosPerSample foto $_gotObservationStageLabel.',
+                : 'Ada $_gotOffType temuan. Tambahkan satu detail untuk setiap jenis karakter yang berbeda; jumlah detail tidak harus sama dengan jumlah temuan. Setiap jenis wajib memiliki $_gotRequiredOffTypePhotosPerSample foto $_gotObservationStageLabel.',
             style: AdvantaText.body2.copyWith(
               color: _gotFetMutedColor(context),
               height: 1.35,
@@ -4856,22 +5232,15 @@ class _GotFetScreenState extends State<GotFetScreen> {
               readOnly: readOnly,
             ),
           ],
-          if (!readOnly && expected > actual) ...[
+          if (!readOnly && _gotOffType > 0) ...[
             const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
                 onPressed: _openGotOffTypeEditor,
                 icon: const Icon(Icons.add_rounded),
-                label: Text('Tambah Sampel Off-Type ${actual + 1}'),
+                label: Text('Tambah Jenis Karakter Off-Type ${actual + 1}'),
               ),
-            ),
-          ],
-          if (!readOnly && actual > expected) ...[
-            const SizedBox(height: 10),
-            Text(
-              'Jumlah sampel melebihi target maksimum. Hapus ${actual - expected} sampel atau sesuaikan jumlah temuan.',
-              style: AdvantaText.caption.copyWith(color: AdvantaColors.error),
             ),
           ],
         ],
@@ -5127,8 +5496,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
                               requiredPhotoCount:
                                   _gotRequiredOffTypePhotosPerSample,
                               sortOrder: detail == null
-                                  ? _gotOffTypeDetails.length
-                                  : _gotOffTypeDetails.indexOf(detail),
+                                  ? _gotOffTypeDetails.fold<int>(
+                                        0,
+                                        (maximum, item) =>
+                                            math.max(maximum, item.sortOrder),
+                                      ) +
+                                      1
+                                  : detail.sortOrder,
                               actor: _actorName,
                             );
                             if (!dialogContext.mounted) return;
@@ -6615,6 +6989,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
         longitude: sample.longitude,
         fieldArea: sample.fieldArea,
         fieldAreaNote: sample.fieldAreaNote,
+        landAreaName: sample.landAreaName,
+        batchLotField: sample.batchLotField,
         statusSample: sample.statusSample,
       );
       if (showResult && mounted) {
@@ -6660,12 +7036,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
           longitude: sample.longitude!,
           fieldArea: sample.fieldArea!,
           fieldAreaNote: sample.fieldAreaNote,
+          landAreaName: sample.landAreaName,
+          batchLotField: sample.batchLotField,
+          statusSample: sample.statusSample,
           actor: _actorName,
         );
         if (!mounted) return;
         setState(() {
           sample.noteTanam = 'Done';
-          sample.statusSample = 'Planted';
+          sample.status = 'To Obs. Veg';
+          _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
       },
     );
@@ -6682,12 +7062,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
     }
     if (!_gotEvidenceReady) {
       _showSnack(
-        'Lengkapi $_gotRequiredOffTypeSampleCount sampel Off-Type × $_gotRequiredOffTypePhotosPerSample foto ($_gotRequiredOffTypePhotoTotal foto).',
+        _gotOffTypeDetails.isEmpty
+            ? 'Tambahkan minimal satu jenis karakter Off-Type yang ditemukan.'
+            : 'Lengkapi $_gotRequiredOffTypePhotosPerSample foto untuk setiap jenis karakter Off-Type.',
       );
       return;
     }
 
-    final submittedStatus = _gotSubmittedStatusLabel;
+    final workflowStatus =
+        _gotObservationStage == _GotObservationStage.vegetative
+            ? 'To Obs. Gen'
+            : 'Waiting Review';
 
     await _runBackendAction(
       successMessage:
@@ -6713,14 +7098,19 @@ class _GotFetScreenState extends State<GotFetScreen> {
             includeGotStage: true,
           ),
         );
-        await _gotFetService.updateSampleStatus(
+        await _gotFetService.updateGotStageSummary(
           batch: _selectedSample.batch,
-          status: submittedStatus,
+          stage: _gotObservationStagePayload,
+          totalObserved: _gotTotalObserved,
+          purityPercent: _gotPurity,
+          offTypePercent: _gotOffTypePercent,
+          selfingPercent: _gotSelfingPercent,
+          malePercent: _gotMalePercent,
         );
         if (!mounted) return;
         setState(() {
-          _selectedSample.status = submittedStatus;
-          _selectedSample.statusSample = submittedStatus;
+          _selectedSample.status = workflowStatus;
+          _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
       },
     );
@@ -6774,7 +7164,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         if (!mounted) return;
         setState(() {
           _selectedSample.status = sampleStatus;
-          _selectedSample.statusSample = sampleStatus;
+          _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
       },
     );
@@ -6812,7 +7202,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         if (!mounted) return;
         setState(() {
           _selectedSample.status = status;
-          _selectedSample.statusSample = status;
+          _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
         onSubmitted?.call();
       },
@@ -6842,7 +7232,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         if (!mounted) return;
         setState(() {
           sample.status = status;
-          sample.statusSample = status;
+          _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
         onConfirmed?.call();
       },
@@ -7081,10 +7471,14 @@ class _GotFetScreenState extends State<GotFetScreen> {
         normalized.contains('resampling')) {
       return AdvantaColors.error;
     }
-    if (normalized.contains('generative') || normalized.contains('generatif')) {
+    if (normalized.contains('generative') ||
+        normalized.contains('generatif') ||
+        normalized.contains('obs gen')) {
       return const Color(0xFF4361EE);
     }
-    if (normalized.contains('vegetative') || normalized.contains('vegetatif')) {
+    if (normalized.contains('vegetative') ||
+        normalized.contains('vegetatif') ||
+        normalized.contains('obs veg')) {
       return AdvantaColors.primaryGreen;
     }
     if (normalized.contains('hold') || normalized.contains('revision')) {
@@ -7095,6 +7489,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
     }
     if (normalized.contains('review')) return AdvantaColors.gold;
     if (normalized.contains('submit')) return AdvantaColors.primaryGreen;
+    if (normalized.contains('ready to plant')) {
+      return AdvantaColors.primaryGreen;
+    }
+    if (normalized.contains('received')) return const Color(0xFF4361EE);
     return AdvantaColors.mutedGrey;
   }
 
@@ -7133,6 +7531,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
       status: _readText(
         row,
         const [
+          'workflow_status',
+          'Workflow Status',
           'status',
           'Status Sample',
           'status_sample',
@@ -7199,6 +7599,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
         fallback: '',
       ),
       statusGot2: _readText(row, const ['status_got_2', 'Status GOT 2']),
+      landAreaName: _readText(
+        row,
+        const ['land_area_name', 'Land Area Name', 'Nama Lahan'],
+        fallback: '',
+      ),
+      batchLotField: _readText(
+        row,
+        const ['batch_lot_field', 'Batch Lot Field'],
+        fallback: '',
+      ),
       statusGotVeg: _readText(
         row,
         const ['status_got_veg', 'Status GOT Veg'],
@@ -7958,46 +8368,55 @@ class _MetricCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: _gotFetCardColor(context),
+    return Material(
+      color: Colors.transparent,
+      borderRadius: AdvantaRadius.cardRadius,
+      child: InkWell(
+        onTap: data.onTap,
         borderRadius: AdvantaRadius.cardRadius,
-        border: Border.all(color: _gotFetBorderColor(context)),
-        boxShadow: _gotFetShadow(context),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Icon(data.icon, color: data.color, size: 22),
-          Column(
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: _gotFetCardColor(context),
+            borderRadius: AdvantaRadius.cardRadius,
+            border: Border.all(color: _gotFetBorderColor(context)),
+            boxShadow: _gotFetShadow(context),
+          ),
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  data.value,
-                  maxLines: 1,
-                  style: AdvantaText.heading2.copyWith(
-                    color: _gotFetIsDark(context) ? Colors.white : data.color,
-                    fontWeight: FontWeight.w900,
+              Icon(data.icon, color: data.color, size: 22),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      data.value,
+                      maxLines: 1,
+                      style: AdvantaText.heading2.copyWith(
+                        color:
+                            _gotFetIsDark(context) ? Colors.white : data.color,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                data.label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: AdvantaText.caption.copyWith(
-                  color: _gotFetMutedColor(context),
-                ),
+                  const SizedBox(height: 2),
+                  Text(
+                    data.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AdvantaText.caption.copyWith(
+                      color: _gotFetMutedColor(context),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-        ],
+        ),
       ),
     );
   }

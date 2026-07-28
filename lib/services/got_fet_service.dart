@@ -85,6 +85,8 @@ class GotFetService {
     double? longitude,
     double? fieldArea,
     String? fieldAreaNote,
+    String? landAreaName,
+    String? batchLotField,
     String? statusSample,
   }) async {
     await _supabase.from(samplesTable).update({
@@ -102,6 +104,8 @@ class GotFetService {
       'field_area': fieldArea,
       'field_area_note': fieldAreaNote,
       'status_sample': statusSample,
+      'land_area_name': landAreaName,
+      'batch_lot_field': batchLotField,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }).eq('batch', batch);
   }
@@ -111,7 +115,43 @@ class GotFetService {
     required String status,
   }) async {
     await _supabase.from(samplesTable).update({
-      'status_sample': status,
+      'workflow_status': status,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }).eq('batch', batch);
+  }
+
+  Future<void> updateGotStageSummary({
+    required String batch,
+    required String stage,
+    required int totalObserved,
+    required double purityPercent,
+    required double offTypePercent,
+    required double selfingPercent,
+    required double malePercent,
+  }) async {
+    final isVegetative = stage.toLowerCase().contains('veget');
+    final stageValues = isVegetative
+        ? <String, dynamic>{
+            'result_percent': purityPercent,
+            'offtype_percent': offTypePercent,
+            'selfing_percent': selfingPercent,
+            'male_percent': malePercent,
+            'vegetative_total': totalObserved,
+            'status_got_veg': 'Submitted',
+            'workflow_status': 'To Obs. Gen',
+          }
+        : <String, dynamic>{
+            'final_result_percent': purityPercent,
+            'final_offtype_percent': offTypePercent,
+            'final_selfing_percent': selfingPercent,
+            'final_male_percent': malePercent,
+            'final_total': totalObserved,
+            'final_status_got': 'Submitted',
+            'workflow_status': 'Waiting Review',
+          };
+
+    await _supabase.from(samplesTable).update({
+      ...stageValues,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }).eq('batch', batch);
   }
@@ -168,6 +208,9 @@ class GotFetService {
     required double longitude,
     required double fieldArea,
     required String fieldAreaNote,
+    required String landAreaName,
+    required String batchLotField,
+    required String statusSample,
     required String actor,
   }) async {
     await updateSamplePlanning(
@@ -185,8 +228,11 @@ class GotFetService {
       longitude: longitude,
       fieldArea: fieldArea,
       fieldAreaNote: fieldAreaNote,
-      statusSample: 'Planted',
+      landAreaName: landAreaName,
+      batchLotField: batchLotField,
+      statusSample: statusSample,
     );
+    await updateSampleStatus(batch: batch, status: 'To Obs. Veg');
     await appendTrackingEvent(
       lotId: lotId,
       status: 'Planted',
@@ -540,13 +586,34 @@ class GotFetService {
         .stream(primaryKey: ['id'])
         .eq('sample_id', sampleId)
         .order('sort_order')
-        .map((rows) => [
-              for (final row in rows)
-                if (row['lot_id']?.toString() == lotId &&
-                    row['plot_id']?.toString() == plotId &&
-                    row['observation_stage']?.toString() == stage)
-                  Map<String, dynamic>.from(row),
-            ]);
+        .map((rows) {
+          final filteredRows = [
+            for (final row in rows)
+              if (row['lot_id']?.toString() == lotId &&
+                  row['plot_id']?.toString() == plotId &&
+                  row['observation_stage']?.toString() == stage)
+                Map<String, dynamic>.from(row),
+          ];
+          filteredRows.sort((a, b) {
+            final orderCompare =
+                (int.tryParse(a['sort_order']?.toString() ?? '') ?? 0)
+                    .compareTo(
+                        int.tryParse(b['sort_order']?.toString() ?? '') ?? 0);
+            if (orderCompare != 0) return orderCompare;
+            final aCreated = DateTime.tryParse(
+                  a['created_at']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            final bCreated = DateTime.tryParse(
+                  b['created_at']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            final createdCompare = aCreated.compareTo(bCreated);
+            if (createdCompare != 0) return createdCompare;
+            return a['id'].toString().compareTo(b['id'].toString());
+          });
+          return filteredRows;
+        });
   }
 
   Future<Map<String, dynamic>> saveGotOffTypeDetail({

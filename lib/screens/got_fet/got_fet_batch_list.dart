@@ -75,7 +75,9 @@ class _BatchListItem extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          sample.batch,
+                          sample.batchLotField.trim().isEmpty
+                              ? sample.batch
+                              : sample.batchLotField,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: AdvantaText.bodyBold.copyWith(
@@ -85,7 +87,7 @@ class _BatchListItem extends StatelessWidget {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${sample.hybrid} | ${sample.testType} | ${sample.processStage}',
+                          'Lot Pabrik: ${sample.batch} | ${sample.hybrid} | ${sample.testType}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: AdvantaText.caption.copyWith(
@@ -105,6 +107,12 @@ class _BatchListItem extends StatelessWidget {
                 runSpacing: 8,
                 children: [
                   _BatchFact(label: 'Location', value: sample.location),
+                  _BatchFact(
+                    label: 'Nama Lahan',
+                    value: sample.landAreaName.trim().isEmpty
+                        ? '-'
+                        : sample.landAreaName,
+                  ),
                   _BatchFact(label: 'Planting', value: plantingDate),
                   _BatchFact(label: 'Result Est.', value: resultEstimation),
                   _BatchFact(

@@ -3,7 +3,6 @@ class GotRevisionRules {
 
   static const vegetativeRequiredPhotos = 2;
   static const generativeRequiredPhotos = 6;
-  static const maxOffTypeSamples = 6;
 
   static const vegetativePhotoLabels = [
     'Tanaman vegetative / tunas',
@@ -18,9 +17,29 @@ class GotRevisionRules {
     'Daun',
     'Keseragaman / hamparan tanaman (landscape)',
   ];
+  static const vegetativeTrueTypePhotoLabels = [
+    'Hamparan',
+    'Tanaman utuh',
+  ];
+
+  static const generativeTrueTypePhotoLabels = [
+    'Hamparan',
+    'Tanaman utuh',
+    'Bunga jantan',
+    'Tongkol & Silking',
+    'Akar',
+    'Daun',
+  ];
 
   static int requiredPhasePhotos(String stage) {
     return offTypePhotoLabels(stage).length;
+  }
+
+  static List<String> trueTypePhotoLabels(String stage) {
+    final normalized = stage.trim().toLowerCase();
+    return normalized.contains('veget')
+        ? vegetativeTrueTypePhotoLabels
+        : generativeTrueTypePhotoLabels;
   }
 
   static List<String> offTypePhotoLabels(String stage) {
@@ -30,9 +49,13 @@ class GotRevisionRules {
         : generativePhotoLabels;
   }
 
-  static int requiredOffTypeSamples(int findingCount) {
-    if (findingCount <= 0) return 0;
-    return findingCount > maxOffTypeSamples ? maxOffTypeSamples : findingCount;
+  static bool offTypeDocumentationReady({
+    required int findingCount,
+    required int documentedCharacterCount,
+    required bool allPhotoPackagesComplete,
+  }) {
+    if (findingCount <= 0) return documentedCharacterCount == 0;
+    return documentedCharacterCount > 0 && allPhotoPackagesComplete;
   }
 
   static bool isValidIndonesiaCoordinate(double latitude, double longitude) {
