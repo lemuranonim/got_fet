@@ -65,4 +65,61 @@ class GotRevisionRules {
         longitude <= 141 &&
         !(latitude == 0 && longitude == 0);
   }
+
+  static String normalizeWorkflowStatus(String status) {
+    return status
+        .trim()
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .trim();
+  }
+
+  static int workflowStageRank(String status) {
+    final normalized = normalizeWorkflowStatus(status);
+    if (normalized.contains('confirmed') ||
+        normalized.contains('approved') ||
+        normalized.contains('completed') ||
+        normalized.contains('selesai')) {
+      return 5;
+    }
+    if (normalized.contains('waiting review') ||
+        normalized.contains('generative submitted') ||
+        normalized.contains('generatif submitted') ||
+        normalized.contains('final generative')) {
+      return 4;
+    }
+    if (normalized.contains('to obs gen') ||
+        normalized.contains('vegetative submitted') ||
+        normalized.contains('vegetatif submitted')) {
+      return 3;
+    }
+    if (normalized.contains('ready to plant') ||
+        normalized.contains('siap tanam')) {
+      return 1;
+    }
+    if (normalized.contains('to obs veg') ||
+        normalized.contains('planted') ||
+        normalized.contains('tanam')) {
+      return 2;
+    }
+    if (normalized.contains('received') || normalized.contains('diterima')) {
+      return 0;
+    }
+    return -1;
+  }
+
+  static String workflowStatusAfterPlantingSave(String currentStatus) {
+    return workflowStageRank(currentStatus) > 2 ? currentStatus : 'To Obs. Veg';
+  }
+
+  static String workflowStatusAfterObservationSubmit({
+    required String currentStatus,
+    required bool vegetative,
+  }) {
+    final targetStatus = vegetative ? 'To Obs. Gen' : 'Waiting Review';
+    final targetRank = vegetative ? 3 : 4;
+    return workflowStageRank(currentStatus) > targetRank
+        ? currentStatus
+        : targetStatus;
+  }
 }

@@ -712,18 +712,49 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   String _combinedSampleStatus(_GotFetSample sample) {
-    return [
-      sample.status,
-      sample.statusSample,
-      sample.statusGot2,
-      sample.statusGotVeg,
-      sample.finalStatusGot,
-      sample.noteTanam,
-    ].join(' ').toLowerCase();
+    return GotRevisionRules.normalizeWorkflowStatus(
+      [
+        sample.status,
+        sample.statusSample,
+        sample.statusGot2,
+        sample.statusGotVeg,
+        sample.finalStatusGot,
+        sample.noteTanam,
+      ].join(' '),
+    );
   }
 
   _GotSampleQueue _gotQueueForSample(_GotFetSample sample) {
+    final workflow = GotRevisionRules.normalizeWorkflowStatus(sample.status);
     final status = _combinedSampleStatus(sample);
+
+    if (workflow.contains('request new sample') ||
+        workflow.contains('resampling')) {
+      return _GotSampleQueue.requestSample;
+    }
+    if (workflow.contains('approved') ||
+        workflow.contains('confirmed') ||
+        workflow.contains('completed') ||
+        workflow.contains('selesai')) {
+      return _GotSampleQueue.completed;
+    }
+    if (workflow.contains('ready to plant') ||
+        workflow.contains('siap tanam')) {
+      return _GotSampleQueue.plantingData;
+    }
+    if (workflow.contains('to obs veg') || workflow.contains('planted')) {
+      return _GotSampleQueue.vegetative;
+    }
+    if (workflow.contains('to obs gen') ||
+        workflow.contains('waiting review') ||
+        workflow.contains('generative submitted') ||
+        workflow.contains('generatif submitted')) {
+      return _GotSampleQueue.generative;
+    }
+    if (workflow.contains('received') || workflow.contains('diterima')) {
+      return _GotSampleQueue.beforePlanting;
+    }
+
     if (_sampleRequestsNewSample(sample)) {
       return _GotSampleQueue.requestSample;
     }
@@ -735,13 +766,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
     if (_sampleVegetativeSubmitted(sample) || status.contains('to obs gen')) {
       return _GotSampleQueue.generative;
     }
-    if (status.contains('ready to plant') || status.contains('siap tanam')) {
-      return _GotSampleQueue.plantingData;
-    }
     if (_samplePlantingReady(sample) ||
         status.contains('to obs veg') ||
         status.contains('planted')) {
       return _GotSampleQueue.vegetative;
+    }
+    if (status.contains('ready to plant') || status.contains('siap tanam')) {
+      return _GotSampleQueue.plantingData;
     }
     return _GotSampleQueue.beforePlanting;
   }
@@ -2174,12 +2205,23 @@ class _GotFetScreenState extends State<GotFetScreen> {
             )
           else
             _buildSampleStatePanel(),
-          if (filteredQueueEmpty)
+          if (filteredQueueEmpty) ...[
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () => _openPage(
+                _page,
+                sampleQueue: _GotSampleQueue.all,
+              ),
+              icon: const Icon(Icons.layers_rounded),
+              label: const Text('Buka Mode Multi-Fitur'),
+            ),
+            const SizedBox(height: 8),
             OutlinedButton.icon(
               onPressed: () => _openPage(_GotFetPage.lotTracking),
               icon: const Icon(Icons.inventory_2_outlined),
               label: const Text('Lihat Semua Lot'),
             ),
+          ],
           const SizedBox(height: 14),
           _ModuleStrip(
             logoAsset: _activeModuleLogo,
@@ -2822,6 +2864,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
                     ),
                     const SizedBox(height: 12),
                     _buildLotSummaryCard(),
+                    if (_activeModule == _InspectionModule.got) ...[
+                      const SizedBox(height: 12),
+                      _buildLotMultiFeatureCard(
+                        closeSheet: () => Navigator.of(sheetContext).pop(),
+                      ),
+                    ],
                     const SizedBox(height: 12),
                     _buildShipmentInfoCard(),
                     const SizedBox(height: 12),
@@ -2947,6 +2995,75 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Widget _buildGotMultiFeatureAccess({
+    required String featureLabel,
+    required _GotSampleQueue guidedQueue,
+  }) {
+    final multiFeature = _activeSampleQueue == _GotSampleQueue.all;
+    final selectedOutsideQueue =
+        multiFeature && !_sampleMatchesQueue(_selectedSample, guidedQueue);
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                multiFeature ? Icons.layers_rounded : Icons.filter_alt_rounded,
+                color: multiFeature
+                    ? AdvantaColors.warning
+                    : AdvantaColors.success,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  multiFeature ? 'Mode Multi-Fitur' : 'Mode Antrean',
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: () => _openPage(
+                  _page,
+                  sampleQueue: multiFeature ? guidedQueue : _GotSampleQueue.all,
+                ),
+                icon: Icon(
+                  multiFeature
+                      ? Icons.filter_alt_rounded
+                      : Icons.layers_rounded,
+                  size: 18,
+                ),
+                label: Text(
+                  multiFeature ? 'Kembali ke Antrean' : 'Pilih Semua Lot',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            multiFeature
+                ? 'Semua lot GOT dapat dipilih untuk $featureLabel. Koreksi fase lama tidak menurunkan status workflow terbaru.'
+                : 'Hanya lot pada ${_gotQueueLabel(guidedQueue)} yang ditampilkan. Aktifkan Multi-Fitur untuk koreksi lot di fase lain.',
+            style: AdvantaText.body2.copyWith(
+              color: _gotFetMutedColor(context),
+              height: 1.35,
+            ),
+          ),
+          if (selectedOutsideQueue) ...[
+            const SizedBox(height: 8),
+            _StatusPill(
+              label:
+                  'Koreksi $featureLabel • status tetap ${_selectedSample.status}',
+              color: AdvantaColors.warning,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget _buildGotPlantingDataPage() {
     final module = _activeModuleCode;
     if (!_hasSamplesForModule(module)) {
@@ -2966,6 +3083,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
             subtitle:
                 'Input, tampilkan, dan hubungkan data tanam ke observasi $module',
           ),
+          if (module == 'GOT') ...[
+            const SizedBox(height: 12),
+            _buildGotMultiFeatureAccess(
+              featureLabel: 'Data Tanam',
+              guidedQueue: _GotSampleQueue.plantingData,
+            ),
+          ],
           const SizedBox(height: 12),
           module == 'FET' ? _buildFetWorkflowCard() : _buildGotWorkflowCard(),
           const SizedBox(height: 12),
@@ -3044,6 +3168,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
             subtitle: _gotObservationStage == _GotObservationStage.vegetative
                 ? 'Fase vegetatif: input hasil dan evidence khusus vegetatif'
                 : 'Fase generative: input hasil dan evidence khusus generative',
+          ),
+          const SizedBox(height: 12),
+          _buildGotMultiFeatureAccess(
+            featureLabel: _gotObservationStageLabel,
+            guidedQueue: _gotObservationStage == _GotObservationStage.vegetative
+                ? _GotSampleQueue.vegetative
+                : _GotSampleQueue.generativeInput,
           ),
           const SizedBox(height: 12),
           _buildGotWorkflowCard(),
@@ -3777,6 +3908,94 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
   }
 
+  Widget _buildLotMultiFeatureCard({required VoidCallback closeSheet}) {
+    void openFeature(
+      _GotFetPage page, {
+      _GotObservationStage? stage,
+    }) {
+      closeSheet();
+      if (stage != null) _setGotObservationStage(stage);
+      _openPage(page, sampleQueue: _GotSampleQueue.all);
+    }
+
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.layers_rounded, color: AdvantaColors.warning),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Multi-Fitur Lot',
+                  style: AdvantaText.heading3.copyWith(
+                    color: _strongTextColor(context),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Buka atau koreksi fase mana pun tanpa menghapus data dan tanpa menurunkan status workflow yang sudah lebih maju.',
+            style: AdvantaText.body2.copyWith(
+              color: _gotFetMutedColor(context),
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 12),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 520;
+              final itemWidth = compact
+                  ? constraints.maxWidth
+                  : (constraints.maxWidth - 16) / 3;
+              return Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  SizedBox(
+                    width: itemWidth,
+                    child: OutlinedButton.icon(
+                      onPressed: () => openFeature(
+                        _GotFetPage.gotPlantingData,
+                      ),
+                      icon: const Icon(Icons.edit_calendar_rounded),
+                      label: const Text('Data Tanam'),
+                    ),
+                  ),
+                  SizedBox(
+                    width: itemWidth,
+                    child: OutlinedButton.icon(
+                      onPressed: () => openFeature(
+                        _GotFetPage.gotInput,
+                        stage: _GotObservationStage.vegetative,
+                      ),
+                      icon: const Icon(Icons.grass_rounded),
+                      label: const Text('Vegetatif'),
+                    ),
+                  ),
+                  SizedBox(
+                    width: itemWidth,
+                    child: OutlinedButton.icon(
+                      onPressed: () => openFeature(
+                        _GotFetPage.gotInput,
+                        stage: _GotObservationStage.finalGenerative,
+                      ),
+                      icon: const Icon(Icons.local_florist_rounded),
+                      label: const Text('Generative'),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildTrackingActionCard({VoidCallback? onConfirmed}) {
     return _PanelCard(
       child: Column(
@@ -4337,6 +4556,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
   Widget _buildPlantingBoundaryCard() {
     final color =
         _gotPlanningReady ? AdvantaColors.success : AdvantaColors.gold;
+    final preservingWorkflow =
+        GotRevisionRules.workflowStageRank(_selectedSample.status) > 2;
 
     return _PanelCard(
       child: Column(
@@ -4346,7 +4567,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
             children: [
               Expanded(
                 child: Text(
-                  'Batas Proses Data Tanam',
+                  'Penyimpanan Data Tanam',
                   style: AdvantaText.heading3.copyWith(
                     color: _strongTextColor(context),
                   ),
@@ -4360,9 +4581,11 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            _activeModule == _InspectionModule.fet
-                ? 'Data tanam ini menjadi acuan jadwal Observasi Day 7 dan Day 11. Foto serta hasil FET baru dapat diproses setelah data tanam lengkap.'
-                : 'Halaman ini menyimpan tanggal tanam, lokasi, field area, status sample, dan estimasi hasil. Submit GOT dilakukan dari menu Vegetatif atau Generative.',
+            preservingWorkflow
+                ? 'Mode koreksi: data tanam dapat diperbarui, sedangkan status workflow tetap ${_selectedSample.status}.'
+                : _activeModule == _InspectionModule.fet
+                    ? 'Data tanam ini menjadi acuan jadwal Observasi Day 7 dan Day 11. Foto serta hasil FET baru dapat diproses setelah data tanam lengkap.'
+                    : 'Halaman ini menyimpan tanggal tanam, lokasi, field area, status sample, dan estimasi hasil. Submit GOT dilakukan dari menu Vegetatif atau Generative.',
             style: AdvantaText.body2.copyWith(
               color: _gotFetMutedColor(context),
               height: 1.35,
@@ -4372,11 +4595,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              icon: const Icon(Icons.save_rounded),
-              label: const Text('Simpan & Tandai Tanam'),
+              icon: Icon(
+                preservingWorkflow
+                    ? Icons.edit_note_rounded
+                    : Icons.save_rounded,
+              ),
+              label: Text(preservingWorkflow
+                  ? 'Simpan Koreksi Data Tanam'
+                  : 'Simpan & Tandai Tanam'),
               onPressed: _isSyncing || !_gotPlanningReady
                   ? null
-                  : _markSelectedSamplePlanted,
+                  : _saveSelectedSamplePlanting,
             ),
           ),
         ],
@@ -4610,6 +4839,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildGotStageLockBanner() {
+    final otherStage = _gotObservationStage == _GotObservationStage.vegetative
+        ? _GotObservationStage.finalGenerative
+        : _GotObservationStage.vegetative;
+    final otherLabel = otherStage == _GotObservationStage.vegetative
+        ? 'Vegetatif'
+        : 'Generative';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
@@ -4620,18 +4855,36 @@ class _GotFetScreenState extends State<GotFetScreen> {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: _gotStageAccentColor.withAlpha(120)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(_gotStageIcon, color: _gotStageAccentColor, size: 20),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              'Fase terkunci: $_gotObservationStageLabel. Untuk fase lain, kembali ke menu GOT lalu pilih Vegetatif atau Generative.',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: AdvantaText.bodyBold.copyWith(
-                color: _gotFetTextColor(context),
+          Row(
+            children: [
+              Icon(_gotStageIcon, color: _gotStageAccentColor, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Fase aktif: $_gotObservationStageLabel. Data setiap fase disimpan terpisah.',
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _gotFetTextColor(context),
+                  ),
+                ),
               ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () {
+                _setGotObservationStage(otherStage);
+                _openPage(
+                  _GotFetPage.gotInput,
+                  sampleQueue: _GotSampleQueue.all,
+                );
+              },
+              icon: const Icon(Icons.swap_horiz_rounded),
+              label: Text('Buka $otherLabel'),
             ),
           ),
         ],
@@ -6971,28 +7224,32 @@ class _GotFetScreenState extends State<GotFetScreen> {
     await _persistSelectedSamplePlanning();
   }
 
+  Future<void> _updateSamplePlanning(_GotFetSample sample) async {
+    await _gotFetService.updateSamplePlanning(
+      batch: sample.batch,
+      plantingDate: sample.plantingDate,
+      weekOfPlanting: sample.weekOfPlanting,
+      resultEstimation: sample.resultEstimation,
+      weekOfResultEstimation: sample.weekOfResultEstimation,
+      noteTanam: sample.noteTanam,
+      location: sample.location,
+      village: sample.village,
+      subDistrict: sample.subDistrict,
+      district: sample.district,
+      latitude: sample.latitude,
+      longitude: sample.longitude,
+      fieldArea: sample.fieldArea,
+      fieldAreaNote: sample.fieldAreaNote,
+      landAreaName: sample.landAreaName,
+      batchLotField: sample.batchLotField,
+      statusSample: sample.statusSample,
+    );
+  }
+
   Future<void> _persistSelectedSamplePlanning({bool showResult = false}) async {
     final sample = _selectedSample;
     try {
-      await _gotFetService.updateSamplePlanning(
-        batch: sample.batch,
-        plantingDate: sample.plantingDate,
-        weekOfPlanting: sample.weekOfPlanting,
-        resultEstimation: sample.resultEstimation,
-        weekOfResultEstimation: sample.weekOfResultEstimation,
-        noteTanam: sample.noteTanam,
-        location: sample.location,
-        village: sample.village,
-        subDistrict: sample.subDistrict,
-        district: sample.district,
-        latitude: sample.latitude,
-        longitude: sample.longitude,
-        fieldArea: sample.fieldArea,
-        fieldAreaNote: sample.fieldAreaNote,
-        landAreaName: sample.landAreaName,
-        batchLotField: sample.batchLotField,
-        statusSample: sample.statusSample,
-      );
+      await _updateSamplePlanning(sample);
       if (showResult && mounted) {
         _showSnack('Data tanam ${sample.batch} tersimpan.');
       }
@@ -7002,7 +7259,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
     }
   }
 
-  Future<void> _markSelectedSamplePlanted() async {
+  Future<void> _saveSelectedSamplePlanting() async {
     final sample = _selectedSample;
     if (!_gotPlanningReady ||
         sample.plantingDate == null ||
@@ -7014,6 +7271,28 @@ class _GotFetScreenState extends State<GotFetScreen> {
         sample.fieldArea == null) {
       _showSnack(
         'Lengkapi tanggal tanam, Village Coordinate, dan field area.',
+      );
+      return;
+    }
+
+    final workflowStatus =
+        GotRevisionRules.workflowStatusAfterPlantingSave(sample.status);
+    final preservingWorkflow =
+        GotRevisionRules.workflowStageRank(sample.status) > 2;
+    if (preservingWorkflow) {
+      await _runBackendAction(
+        successMessage:
+            'Data tanam ${sample.batch} diperbarui. Status tetap $workflowStatus.',
+        action: () async {
+          await _updateSamplePlanning(sample);
+          await _gotFetService.appendTrackingEvent(
+            lotId: sample.lotId,
+            status: 'Planting Data Updated',
+            actor: _actorName,
+            remarks:
+                'Koreksi Data Tanam melalui Mode Multi-Fitur; workflow tetap $workflowStatus.',
+          );
+        },
       );
       return;
     }
@@ -7044,7 +7323,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
         if (!mounted) return;
         setState(() {
           sample.noteTanam = 'Done';
-          sample.status = 'To Obs. Veg';
+          sample.status = workflowStatus;
           _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
       },
@@ -7069,10 +7348,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
       return;
     }
 
+    final isVegetative =
+        _gotObservationStage == _GotObservationStage.vegetative;
     final workflowStatus =
-        _gotObservationStage == _GotObservationStage.vegetative
-            ? 'To Obs. Gen'
-            : 'Waiting Review';
+        GotRevisionRules.workflowStatusAfterObservationSubmit(
+      currentStatus: _selectedSample.status,
+      vegetative: isVegetative,
+    );
 
     await _runBackendAction(
       successMessage:
@@ -7106,6 +7388,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           offTypePercent: _gotOffTypePercent,
           selfingPercent: _gotSelfingPercent,
           malePercent: _gotMalePercent,
+          workflowStatus: workflowStatus,
         );
         if (!mounted) return;
         setState(() {

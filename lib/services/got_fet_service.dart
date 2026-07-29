@@ -128,6 +128,7 @@ class GotFetService {
     required double offTypePercent,
     required double selfingPercent,
     required double malePercent,
+    required String workflowStatus,
   }) async {
     final isVegetative = stage.toLowerCase().contains('veget');
     final stageValues = isVegetative
@@ -138,7 +139,7 @@ class GotFetService {
             'male_percent': malePercent,
             'vegetative_total': totalObserved,
             'status_got_veg': 'Submitted',
-            'workflow_status': 'To Obs. Gen',
+            'workflow_status': workflowStatus,
           }
         : <String, dynamic>{
             'final_result_percent': purityPercent,
@@ -147,7 +148,7 @@ class GotFetService {
             'final_male_percent': malePercent,
             'final_total': totalObserved,
             'final_status_got': 'Submitted',
-            'workflow_status': 'Waiting Review',
+            'workflow_status': workflowStatus,
           };
 
     await _supabase.from(samplesTable).update({

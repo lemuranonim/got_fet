@@ -93,4 +93,47 @@ void main() {
     expect(GotRevisionRules.isValidIndonesiaCoordinate(0, 0), isFalse);
     expect(GotRevisionRules.isValidIndonesiaCoordinate(40, 112), isFalse);
   });
+
+  group('multi-feature workflow safety', () {
+    test('explicit workflow stages have a stable order', () {
+      expect(GotRevisionRules.workflowStageRank('Received'), 0);
+      expect(GotRevisionRules.workflowStageRank('Ready to Plant'), 1);
+      expect(GotRevisionRules.workflowStageRank('To Obs. Veg'), 2);
+      expect(GotRevisionRules.workflowStageRank('To Obs. Gen'), 3);
+      expect(GotRevisionRules.workflowStageRank('Waiting Review'), 4);
+      expect(GotRevisionRules.workflowStageRank('Confirmed'), 5);
+    });
+
+    test('planting correction never regresses an advanced workflow', () {
+      expect(
+        GotRevisionRules.workflowStatusAfterPlantingSave('Ready to Plant'),
+        'To Obs. Veg',
+      );
+      expect(
+        GotRevisionRules.workflowStatusAfterPlantingSave('Waiting Review'),
+        'Waiting Review',
+      );
+      expect(
+        GotRevisionRules.workflowStatusAfterPlantingSave('Confirmed'),
+        'Confirmed',
+      );
+    });
+
+    test('earlier observation correction preserves a later workflow', () {
+      expect(
+        GotRevisionRules.workflowStatusAfterObservationSubmit(
+          currentStatus: 'Waiting Review',
+          vegetative: true,
+        ),
+        'Waiting Review',
+      );
+      expect(
+        GotRevisionRules.workflowStatusAfterObservationSubmit(
+          currentStatus: 'To Obs. Gen',
+          vegetative: false,
+        ),
+        'Waiting Review',
+      );
+    });
+  });
 }
