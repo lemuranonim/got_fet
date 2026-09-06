@@ -2,6 +2,36 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kroscek_got_fet/domain/got_revision_rules.dart';
 
 void main() {
+  group('GOT purity calculation', () {
+    test('PS and commercial thresholds follow the review decision', () {
+      expect(GotRevisionRules.purityThreshold('PS'), 99.5);
+      expect(GotRevisionRules.purityThreshold('Komersil'), 95);
+    });
+
+    test('suspicious plants are represented in the percentage total', () {
+      final trueType = GotRevisionRules.trueTypeCount(
+        totalObserved: 100,
+        offTypeCount: 1,
+        selfingCount: 1,
+        maleCount: 1,
+        suspiciousCount: 2,
+      );
+      expect(trueType, 95);
+      expect(GotRevisionRules.percentage(2, 100), 2);
+      expect(
+        GotRevisionRules.totalPercentage(
+          totalObserved: 100,
+          trueTypeCount: trueType,
+          offTypeCount: 1,
+          selfingCount: 1,
+          maleCount: 1,
+          suspiciousCount: 2,
+        ),
+        100,
+      );
+    });
+  });
+
   group('GOT phase photo rules', () {
     test('Vegetative requires exactly two photos', () {
       expect(GotRevisionRules.requiredPhasePhotos('Vegetative'), 2);
@@ -81,6 +111,25 @@ void main() {
     expect(
       GotRevisionRules.trueTypePhotoLabels('Final Generative'),
       GotRevisionRules.generativeTrueTypePhotoLabels,
+    );
+  });
+
+  test('final Off-Type photos expose the requested characterization fields',
+      () {
+    final tassel = GotRevisionRules.characterizationGroupForPhoto(
+      'Final Generative',
+      'Bunga jantan',
+    );
+    expect(
+      tassel?.fields.map((field) => field.key),
+      ['tassel_type', 'anther_color', 'glume_color'],
+    );
+    expect(
+      GotRevisionRules.characterizationGroupForPhoto(
+        'Vegetative',
+        'Tanaman vegetative / tunas',
+      ),
+      isNull,
     );
   });
 

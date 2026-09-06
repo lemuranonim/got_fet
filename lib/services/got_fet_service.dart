@@ -88,6 +88,7 @@ class GotFetService {
     String? landAreaName,
     String? batchLotField,
     String? statusSample,
+    String? purityClass,
   }) async {
     await _supabase.from(samplesTable).update({
       'planting_date': _dateOnly(plantingDate),
@@ -104,6 +105,7 @@ class GotFetService {
       'field_area': fieldArea,
       'field_area_note': fieldAreaNote,
       'status_sample': statusSample,
+      if (purityClass != null) 'purity_class': purityClass,
       'land_area_name': landAreaName,
       'batch_lot_field': batchLotField,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
@@ -128,6 +130,8 @@ class GotFetService {
     required double offTypePercent,
     required double selfingPercent,
     required double malePercent,
+    required double suspiciousPercent,
+    required double totalPercent,
     required String workflowStatus,
   }) async {
     final isVegetative = stage.toLowerCase().contains('veget');
@@ -137,6 +141,8 @@ class GotFetService {
             'offtype_percent': offTypePercent,
             'selfing_percent': selfingPercent,
             'male_percent': malePercent,
+            'suspicious_percent': suspiciousPercent,
+            'total_percent': totalPercent,
             'vegetative_total': totalObserved,
             'status_got_veg': 'Submitted',
             'workflow_status': workflowStatus,
@@ -146,6 +152,8 @@ class GotFetService {
             'final_offtype_percent': offTypePercent,
             'final_selfing_percent': selfingPercent,
             'final_male_percent': malePercent,
+            'final_suspicious_percent': suspiciousPercent,
+            'final_total_percent': totalPercent,
             'final_total': totalObserved,
             'final_status_got': 'Submitted',
             'workflow_status': workflowStatus,
@@ -333,6 +341,51 @@ class GotFetService {
         });
   }
 
+  Stream<List<Map<String, dynamic>>> watchFetObservationRowsForSample({
+    required String lotId,
+    required String sampleId,
+  }) {
+    return _supabase
+        .from(fetObservationTable)
+        .stream(primaryKey: ['id'])
+        .eq('sample_id', sampleId)
+        .order('submitted_datetime', ascending: false)
+        .map((rows) {
+          final filteredRows = [
+            for (final row in rows)
+              if (row['lot_id']?.toString() == lotId)
+                Map<String, dynamic>.from(row),
+          ];
+          filteredRows.sort((a, b) {
+            final aDate = DateTime.tryParse(
+                  a['submitted_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            final bDate = DateTime.tryParse(
+                  b['submitted_datetime']?.toString() ?? '',
+                ) ??
+                DateTime.fromMillisecondsSinceEpoch(0);
+            return bDate.compareTo(aDate);
+          });
+          return filteredRows;
+        });
+  }
+
+  Future<List<Map<String, dynamic>>> fetchFetObservationRowsForSample({
+    required String lotId,
+    required String sampleId,
+  }) async {
+    final response = await _supabase
+        .from(fetObservationTable)
+        .select()
+        .eq('lot_id', lotId)
+        .eq('sample_id', sampleId)
+        .order('submitted_datetime', ascending: false);
+    return [
+      for (final row in response) Map<String, dynamic>.from(row),
+    ];
+  }
+
   Future<Map<String, dynamic>?> fetchLatestFetObservation({
     required String lotId,
     required String sampleId,
@@ -494,7 +547,7 @@ class GotFetService {
         for (var i = 0; i < pointStatuses.length; i++)
           {'point_no': i + 1, 'status': pointStatuses[i]},
       ],
-      'plot_photo_url': photoUrls.isEmpty ? null : photoUrls.first,
+      if (photoUrls.isNotEmpty) 'plot_photo_url': photoUrls.first,
       'remark_status': remarkStatus,
       'remarks': remarks,
       'submitted_by': submittedBy,
@@ -630,6 +683,7 @@ class GotFetService {
     required String characterNote,
     required String similarityAssessment,
     required String referenceHybrid,
+    required Map<String, String> characterization,
     required int requiredPhotoCount,
     required int sortOrder,
     required String actor,
@@ -647,6 +701,7 @@ class GotFetService {
       'character_note': characterNote,
       'similarity_assessment': similarityAssessment,
       'reference_hybrid': referenceHybrid,
+      'characterization': characterization,
       'required_photo_count': requiredPhotoCount,
       'sort_order': sortOrder,
       'updated_by': actor,
@@ -806,6 +861,84 @@ class GotFetService {
         'Foto sudah terupload ke Storage, tapi metadata gagal disimpan ke tabel $photoEvidenceTable. '
         'Pastikan schema/policy tabel evidence sudah dijalankan. Detail: ${_errorMessage(error)}',
       );
+    }
+  }
+
+  Future<void> saveFetEvidencePhoto({
+    required File file,
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required int dap,
+    required int replication,
+    required String uploadedBy,
+  }) async {
+    final uploadedAt = DateTime.now().toUtc().toIso8601String();
+    if (!file.existsSync() || file.lengthSync() == 0) {
+      throw const GotFetStorageException(
+        'File foto FET tidak tersedia di perangkat.',
+      );
+    }
+
+    final uploadedPath = await _uploadEvidencePhoto(
+      file: file,
+      lotId: lotId,
+      module: 'fet',
+      stage: 'day_$dap',
+      category: 'plot',
+      replication: 'u$replication',
+    );
+    final photoUrl =
+        _supabase.storage.from(evidenceBucket).getPublicUrl(uploadedPath);
+
+    await _supabase
+        .from(fetObservationTable)
+        .update({
+          'plot_photo_url': photoUrl,
+          'updated_at': uploadedAt,
+        })
+        .eq('lot_id', lotId)
+        .eq('sample_id', sampleId)
+        .eq('plot_id', plotId)
+        .eq('dap', dap)
+        .eq('replication', replication);
+
+    final replicationLabel = 'D$dap-U$replication';
+    final payload = {
+      'lot_id': lotId,
+      'sample_id': sampleId,
+      'test_type': 'FET',
+      'module': 'fet',
+      'plot_id': plotId,
+      'replication': replicationLabel,
+      'observation_stage': 'Day $dap',
+      'evidence_category': 'plot',
+      'rcv_no': replication,
+      'rcv_label': replicationLabel,
+      'storage_path': uploadedPath,
+      'photo_url': photoUrl,
+      'uploaded_by': uploadedBy,
+      'uploaded_datetime': uploadedAt,
+      'review_status': 'Submitted',
+      'created_by_user_id': _supabase.auth.currentUser?.id,
+      'updated_at': uploadedAt,
+    };
+    final existing = await _supabase
+        .from(photoEvidenceTable)
+        .select('id')
+        .eq('lot_id', lotId)
+        .eq('sample_id', sampleId)
+        .eq('module', 'fet')
+        .eq('plot_id', plotId)
+        .eq('replication', replicationLabel)
+        .limit(1);
+    if (existing.isEmpty) {
+      await _supabase.from(photoEvidenceTable).insert(payload);
+    } else {
+      await _supabase
+          .from(photoEvidenceTable)
+          .update(payload)
+          .eq('id', existing.first['id'] as Object);
     }
   }
 

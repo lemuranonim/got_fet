@@ -13,6 +13,8 @@ create table if not exists public.got_fet_samples (
   commercial_qty_inventory numeric,
   flagging text,
   reason_testing text,
+  purity_class text not null default 'Komersil'
+    check (purity_class in ('PS', 'Komersil')),
   delivery_date_1 date,
   delivery_date_2 date,
   planting_date date,
@@ -31,6 +33,8 @@ create table if not exists public.got_fet_samples (
   offtype_percent numeric,
   selfing_percent numeric,
   male_percent numeric,
+  suspicious_percent numeric,
+  total_percent numeric,
   vegetative_total numeric,
   status_got_veg text,
   vegetative_no_obs text,
@@ -38,6 +42,8 @@ create table if not exists public.got_fet_samples (
   final_offtype_percent numeric,
   final_selfing_percent numeric,
   final_male_percent numeric,
+  final_suspicious_percent numeric,
+  final_total_percent numeric,
   final_total numeric,
   final_status_got text,
   final_no_obs text,
@@ -167,13 +173,15 @@ create table if not exists public.got_fet_fet_observation (
   point_statuses jsonb not null default '[]'::jsonb,
   plot_photo_url text,
   remarks text,
+  remark_status text not null default 'Done'
+    check (remark_status in ('Retest', 'Resampling', 'Done')),
   submitted_by text,
   submitted_datetime timestamptz not null default now(),
   review_status text not null default 'Draft',
   created_by_user_id uuid,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique (lot_id, sample_id, plot_id, replication)
+  unique (lot_id, sample_id, plot_id, dap, replication)
 );
 
 alter table public.got_fet_fet_observation
@@ -184,6 +192,7 @@ create index if not exists got_fet_fet_observation_lookup_idx
     lot_id,
     sample_id,
     plot_id,
+    dap,
     replication,
     submitted_datetime desc
   );
@@ -193,6 +202,7 @@ create unique index if not exists got_fet_fet_observation_slot_uidx
     lot_id,
     sample_id,
     plot_id,
+    dap,
     replication
   );
 

@@ -21,6 +21,7 @@ class _GotFetSample {
   final num? commercialQtyInventory;
   final String flagging;
   final String reasonTesting;
+  String purityClass;
   final DateTime? deliveryDate1;
   final DateTime? deliveryDate2;
   DateTime? plantingDate;
@@ -69,6 +70,7 @@ class _GotFetSample {
     this.commercialQtyInventory,
     this.flagging = '-',
     this.reasonTesting = '-',
+    this.purityClass = GotRevisionRules.commercialPurityClass,
     this.deliveryDate1,
     this.deliveryDate2,
     this.plantingDate,
@@ -396,6 +398,7 @@ class _GotOffTypeDetail {
   final _GotOffTypeSimilarity similarity;
   final String referenceHybrid;
   final int requiredPhotoCount;
+  final Map<String, String> characterization;
 
   final int sortOrder;
   const _GotOffTypeDetail({
@@ -408,12 +411,16 @@ class _GotOffTypeDetail {
     required this.similarity,
     required this.referenceHybrid,
     required this.requiredPhotoCount,
+    this.characterization = const {},
     required this.sortOrder,
   });
 
   String get title => typeCode.trim().isEmpty
       ? 'Kategori $categoryNo - $typeLabel'
       : 'Kategori $categoryNo$typeCode - $typeLabel';
+
+  int get completedCharacterizationCount =>
+      characterization.values.where((value) => value.trim().isNotEmpty).length;
 }
 
 class _FetObservationResult {

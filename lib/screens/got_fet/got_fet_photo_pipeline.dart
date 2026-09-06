@@ -1,7 +1,8 @@
 part of 'got_fet_screen.dart';
 
 class _SmartPhotoPipeline {
-  static const _queueKey = 'got_fet.smart_photo.queue';
+  static const _gotQueueKey = 'got_fet.smart_photo.queue';
+  static const _fetQueueKey = 'got_fet.smart_photo.fet_queue';
   static const _fingerprintsKey = 'got_fet.smart_photo.fingerprints';
   static const _fingerprintLimit = 90;
 
@@ -30,9 +31,12 @@ class _SmartPhotoPipeline {
           'File foto tidak ditemukan setelah capture.');
     }
 
-    final bytes = await sourceFile.readAsBytes();
-    final fingerprint = sha1.convert(bytes).toString();
-    final analysis = await _SmartPhotoQuality.analyze(bytes);
+    final sourceBytes = await sourceFile.readAsBytes();
+    final isFet = context.module.toLowerCase() == 'fet';
+    final analysisBytes =
+        isFet ? await _renderFetFrameCrop(sourceBytes) : sourceBytes;
+    final fingerprint = sha1.convert(analysisBytes).toString();
+    final analysis = await _SmartPhotoQuality.analyze(analysisBytes);
     final metadata = _SmartPhotoMetadata(
       id: DateTime.now().microsecondsSinceEpoch.toString(),
       module: context.module,
@@ -49,20 +53,28 @@ class _SmartPhotoPipeline {
       fingerprint: fingerprint,
       width: analysis.width,
       height: analysis.height,
-      fileBytes: bytes.length,
+      fileBytes: analysisBytes.length,
       averageLuma: analysis.averageLuma,
       edgeScore: analysis.edgeScore,
       warnings: analysis.warnings,
     );
-    final analysisFile = await _copyIntoManagedFolder(
-      sourceFile: sourceFile,
-      metadata: metadata,
-      extension: _extensionForPath(sourceFile.path),
-      suffix: 'original',
-    );
+    final analysisFile = isFet
+        ? await _writeIntoManagedFolder(
+            bytes: analysisBytes,
+            metadata: metadata,
+            extension: 'png',
+            suffix: 'framed',
+          )
+        : await _copyIntoManagedFolder(
+            sourceFile: sourceFile,
+            metadata: metadata,
+            extension: _extensionForPath(sourceFile.path),
+            suffix: 'original',
+          );
     var evidenceFile = analysisFile;
-    if (context.module.toLowerCase() == 'fet' && context.replication != null) {
-      final watermarkedBytes = await _renderFetWatermark(bytes, metadata);
+    if (isFet && context.replication != null) {
+      final watermarkedBytes =
+          await _renderFetWatermark(analysisBytes, metadata);
       evidenceFile = await _writeIntoManagedFolder(
         bytes: watermarkedBytes,
         metadata: metadata,
@@ -116,6 +128,35 @@ class _SmartPhotoPipeline {
     await _saveQueue(nextEntries);
   }
 
+  Future<void> enqueueFetEvidence({
+    required _PreparedSmartPhoto prepared,
+    required String lotId,
+    required String sampleId,
+    required String plotId,
+    required int dap,
+    required int replication,
+    required String uploadedBy,
+  }) async {
+    await initialize();
+    final entries = _fetQueueEntries();
+    final entry = _QueuedFetEvidencePhoto(
+      id: prepared.metadata.id,
+      localPath: prepared.file.path,
+      lotId: lotId,
+      sampleId: sampleId,
+      plotId: plotId,
+      dap: dap,
+      replication: replication,
+      uploadedBy: uploadedBy,
+      queuedAt: DateTime.now().toUtc(),
+    );
+    await _saveFetQueue([
+      for (final item in entries)
+        if (item.slotKey != entry.slotKey) item,
+      entry,
+    ]);
+  }
+
   Future<int> syncPendingGotEvidence(GotFetService service) async {
     await initialize();
     final entries = _queueEntries();
@@ -151,12 +192,48 @@ class _SmartPhotoPipeline {
     return synced;
   }
 
+  Future<int> syncPendingFetEvidence(GotFetService service) async {
+    await initialize();
+    final entries = _fetQueueEntries();
+    if (entries.isEmpty) return 0;
+
+    var synced = 0;
+    final remaining = <_QueuedFetEvidencePhoto>[];
+    for (final entry in entries) {
+      final file = File(entry.localPath);
+      if (!file.existsSync() || file.lengthSync() == 0) {
+        continue;
+      }
+      try {
+        await service.saveFetEvidencePhoto(
+          file: file,
+          lotId: entry.lotId,
+          sampleId: entry.sampleId,
+          plotId: entry.plotId,
+          dap: entry.dap,
+          replication: entry.replication,
+          uploadedBy: entry.uploadedBy,
+        );
+        synced++;
+      } catch (_) {
+        remaining.add(entry);
+      }
+    }
+    await _saveFetQueue(remaining);
+    return synced;
+  }
+
   Future<_SmartPhotoStatus> status() async {
     await initialize();
-    final entries = _queueEntries();
+    final gotEntries = _queueEntries();
+    final fetEntries = _fetQueueEntries();
+    final queuedDates = [
+      for (final entry in gotEntries) entry.queuedAt,
+      for (final entry in fetEntries) entry.queuedAt,
+    ]..sort();
     return _SmartPhotoStatus(
-      pendingUploads: entries.length,
-      lastQueuedAt: entries.isEmpty ? null : entries.last.queuedAt,
+      pendingUploads: gotEntries.length + fetEntries.length,
+      lastQueuedAt: queuedDates.isEmpty ? null : queuedDates.last,
     );
   }
 
@@ -279,8 +356,56 @@ class _SmartPhotoPipeline {
     return outputData.buffer.asUint8List();
   }
 
+  Future<Uint8List> _renderFetFrameCrop(Uint8List bytes) async {
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    final sourceImage = frame.image;
+    try {
+      const insetRatio = .06;
+      final insetX = sourceImage.width * insetRatio;
+      final insetY = sourceImage.height * insetRatio;
+      final sourceRect = Rect.fromLTWH(
+        insetX,
+        insetY,
+        sourceImage.width - insetX * 2,
+        sourceImage.height - insetY * 2,
+      );
+      final outputWidth = sourceRect.width.round();
+      final outputHeight = sourceRect.height.round();
+      final recorder = ui.PictureRecorder();
+      final canvas = ui.Canvas(recorder);
+      canvas.drawImageRect(
+        sourceImage,
+        sourceRect,
+        Rect.fromLTWH(
+          0,
+          0,
+          outputWidth.toDouble(),
+          outputHeight.toDouble(),
+        ),
+        Paint()..filterQuality = FilterQuality.high,
+      );
+      final picture = recorder.endRecording();
+      final outputImage = await picture.toImage(outputWidth, outputHeight);
+      final outputData = await outputImage.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+      outputImage.dispose();
+      picture.dispose();
+      if (outputData == null) {
+        throw const GotFetStorageException(
+          'Gagal memotong foto sesuai bingkai FET.',
+        );
+      }
+      return outputData.buffer.asUint8List();
+    } finally {
+      sourceImage.dispose();
+      codec.dispose();
+    }
+  }
+
   List<_QueuedGotEvidencePhoto> _queueEntries() {
-    final raw = _prefs?.getString(_queueKey);
+    final raw = _prefs?.getString(_gotQueueKey);
     if (raw == null || raw.trim().isEmpty) return const [];
     try {
       final data = jsonDecode(raw);
@@ -299,7 +424,34 @@ class _SmartPhotoPipeline {
 
   Future<void> _saveQueue(List<_QueuedGotEvidencePhoto> entries) async {
     await _prefs?.setString(
-      _queueKey,
+      _gotQueueKey,
+      jsonEncode([for (final entry in entries) entry.toJson()]),
+    );
+  }
+
+  List<_QueuedFetEvidencePhoto> _fetQueueEntries() {
+    final raw = _prefs?.getString(_fetQueueKey);
+    if (raw == null || raw.trim().isEmpty) return const [];
+    try {
+      final data = jsonDecode(raw);
+      if (data is! List) return const [];
+      return [
+        for (final item in data)
+          if (item is Map<String, dynamic>)
+            _QueuedFetEvidencePhoto.fromJson(item)
+          else if (item is Map)
+            _QueuedFetEvidencePhoto.fromJson(
+              Map<String, dynamic>.from(item),
+            ),
+      ];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> _saveFetQueue(List<_QueuedFetEvidencePhoto> entries) async {
+    await _prefs?.setString(
+      _fetQueueKey,
       jsonEncode([for (final entry in entries) entry.toJson()]),
     );
   }
@@ -701,6 +853,61 @@ class _QueuedGotEvidencePhoto {
                   ? Map<String, dynamic>.from(metadataJson)
                   : const {},
             ),
+    );
+  }
+}
+
+class _QueuedFetEvidencePhoto {
+  final String id;
+  final String localPath;
+  final String lotId;
+  final String sampleId;
+  final String plotId;
+  final int dap;
+  final int replication;
+  final String uploadedBy;
+  final DateTime queuedAt;
+
+  const _QueuedFetEvidencePhoto({
+    required this.id,
+    required this.localPath,
+    required this.lotId,
+    required this.sampleId,
+    required this.plotId,
+    required this.dap,
+    required this.replication,
+    required this.uploadedBy,
+    required this.queuedAt,
+  });
+
+  String get slotKey => '$lotId|$sampleId|$plotId|$dap|$replication';
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'localPath': localPath,
+      'lotId': lotId,
+      'sampleId': sampleId,
+      'plotId': plotId,
+      'dap': dap,
+      'replication': replication,
+      'uploadedBy': uploadedBy,
+      'queuedAt': queuedAt.toIso8601String(),
+    };
+  }
+
+  factory _QueuedFetEvidencePhoto.fromJson(Map<String, dynamic> json) {
+    return _QueuedFetEvidencePhoto(
+      id: json['id']?.toString() ?? '',
+      localPath: json['localPath']?.toString() ?? '',
+      lotId: json['lotId']?.toString() ?? '-',
+      sampleId: json['sampleId']?.toString() ?? '-',
+      plotId: json['plotId']?.toString() ?? '-',
+      dap: _jsonInt(json['dap']),
+      replication: _jsonInt(json['replication']),
+      uploadedBy: json['uploadedBy']?.toString() ?? '-',
+      queuedAt: DateTime.tryParse(json['queuedAt']?.toString() ?? '') ??
+          DateTime.now().toUtc(),
     );
   }
 }

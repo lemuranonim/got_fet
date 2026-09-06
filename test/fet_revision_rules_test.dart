@@ -27,4 +27,28 @@ void main() {
       ['Lot: LOT-001', 'Ulangan: 2'],
     );
   });
+
+  test('FET result estimation is planting date plus 12 days', () {
+    expect(
+      FetRevisionRules.resultEstimation(DateTime(2026, 7, 31)),
+      DateTime(2026, 8, 12),
+    );
+  });
+
+  test('lot status stays in progress until all four slots are complete', () {
+    expect(
+      FetRevisionRules.lotProgressStatus(
+        completedSlots: 3,
+        hasActionRequired: false,
+      ),
+      'FET In Progress (3/4)',
+    );
+    expect(
+      FetRevisionRules.lotProgressStatus(
+        completedSlots: 4,
+        hasActionRequired: false,
+      ),
+      'FET Observation Complete',
+    );
+  });
 }

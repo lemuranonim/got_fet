@@ -214,6 +214,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
   final Map<int, File> _fetAnalysisPhotosBySlot = {};
   final Map<int, _SmartPhotoMetadata> _fetPlotMetadataBySlot = {};
   final Map<int, _FetAutoDetectionResult> _fetAutoDetectionBySlot = {};
+  final Map<int, _FetObservationResult> _fetObservationsBySlot = {};
   int? _analyzingFetSlot;
   _FetObservationResult? _latestFetObservation;
   _SmartPhotoStatus _smartPhotoStatus = const _SmartPhotoStatus();
@@ -274,9 +275,13 @@ class _GotFetScreenState extends State<GotFetScreen> {
     if (_isRetryingPhotoQueue) return;
     setState(() => _isRetryingPhotoQueue = true);
     try {
-      final synced = await _photoPipeline.syncPendingGotEvidence(
+      final syncedGot = await _photoPipeline.syncPendingGotEvidence(
         _gotFetService,
       );
+      final syncedFet = await _photoPipeline.syncPendingFetEvidence(
+        _gotFetService,
+      );
+      final synced = syncedGot + syncedFet;
       await _refreshSmartPhotoStatus();
       if (!mounted || !showResult) return;
       _showSnack(
@@ -419,102 +424,37 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return 1;
   }
 
-  int get _gotConfirmedIssueCount => _gotOffType + _gotSelfing + _gotMale;
+  int get _gotClassifiedIssueCount => GotRevisionRules.classifiedIssueCount(
+        offTypeCount: _gotOffType,
+        selfingCount: _gotSelfing,
+        maleCount: _gotMale,
+        suspiciousCount: _gotSuspicious,
+      );
 
-  bool get _gotCountsValid => _gotConfirmedIssueCount <= _gotTotalObserved;
+  bool get _gotCountsValid => _gotClassifiedIssueCount <= _gotTotalObserved;
 
-  int get _gotTrueType =>
-      math.max(0, _gotTotalObserved - _gotConfirmedIssueCount);
+  int get _gotTrueType => GotRevisionRules.trueTypeCount(
+        totalObserved: _gotTotalObserved,
+        offTypeCount: _gotOffType,
+        selfingCount: _gotSelfing,
+        maleCount: _gotMale,
+        suspiciousCount: _gotSuspicious,
+      );
 
   double get _gotPurity =>
       _gotTotalObserved == 0 ? 0 : (_gotTrueType / _gotTotalObserved) * 100;
 
   ({String label, double threshold})? get _gotPassFailRule {
     final sample = _selectedSample;
-    final productSource = _normalizeRuleText(
-      '${sample.category} ${sample.processStage} ${sample.reasonTesting} ${sample.testType}',
-    );
-    final typeSource = _normalizeRuleText(
-      '${sample.typeSeed} ${sample.category} ${sample.reasonTesting}',
-    );
-    final genderSource = _normalizeRuleText(
-      '${sample.gender} ${sample.typeSeed} ${sample.category}',
-    );
-    final allSource = _normalizeRuleText(
-      '$productSource $typeSource $genderSource',
-    );
-
-    final isParentSeed = _containsRuleTerm(allSource, const [
-      'ps',
-      'parent seed',
-      'parent stock',
-      'parental',
-      'inbred',
-    ]);
-    final isCommercial = _containsRuleTerm(allSource, const [
-      'commercial',
-      'komersial',
-      'komersil',
-      'cs',
-      'f1',
-      'hybrid commercial',
-    ]);
-    final isManis = _containsRuleTerm(typeSource, const [
-      'manis',
-      'sweet',
-      'sweet corn',
-    ]);
-    final isAtos = _containsRuleTerm(typeSource, const [
-      'atos',
-      'field corn',
-      'fieldcorn',
-      'grain',
-      'dent',
-    ]);
-
-    final productLabel = isManis
-        ? 'Sweet Corn'
-        : isAtos
-            ? 'Field Corn'
-            : null;
-    final genderLabel = _gotRuleGenderLabel(genderSource);
-
-    if (isParentSeed) {
-      if (genderLabel == 'Male') {
-        return (
-          label: '${productLabel ?? 'Corn'} PS (Male)',
-          threshold: 100,
-        );
-      }
-      if (genderLabel == 'Female') {
-        return (
-          label: '${productLabel ?? 'Corn'} PS (Female)',
-          threshold: 99.95,
-        );
-      }
-      return (
-        label: '${productLabel ?? 'Corn'} PS (Male/Female)',
-        threshold: 99.95,
-      );
+    if (!GotRevisionRules.purityClasses.contains(sample.purityClass)) {
+      return null;
     }
-
-    if (isCommercial || isManis || isAtos) {
-      if (isManis) return (label: 'Sweet Corn F1', threshold: 97);
-      if (isAtos) return (label: 'Field Corn F1', threshold: 95);
-      return (label: 'Corn F1', threshold: 95);
-    }
-
-    return null;
-  }
-
-  String? _gotRuleGenderLabel(String genderSource) {
-    if (_containsRuleTerm(genderSource, const ['male', 'jantan'])) {
-      return 'Male';
-    }
-    if (_containsRuleTerm(genderSource, const ['female', 'betina'])) {
-      return 'Female';
-    }
-    return null;
+    return (
+      label: sample.purityClass == GotRevisionRules.parentSeedPurityClass
+          ? 'Parent Seed (PS)'
+          : 'Komersil',
+      threshold: GotRevisionRules.purityThreshold(sample.purityClass),
+    );
   }
 
   String get _gotCalculationReference {
@@ -563,6 +503,17 @@ class _GotFetScreenState extends State<GotFetScreen> {
   double get _gotSelfingPercent => _gotPercent(_gotSelfing);
 
   double get _gotMalePercent => _gotPercent(_gotMale);
+
+  double get _gotSuspiciousPercent => _gotPercent(_gotSuspicious);
+
+  double get _gotTotalPercent => GotRevisionRules.totalPercentage(
+        totalObserved: _gotTotalObserved,
+        trueTypeCount: _gotTrueType,
+        offTypeCount: _gotOffType,
+        selfingCount: _gotSelfing,
+        maleCount: _gotMale,
+        suspiciousCount: _gotSuspicious,
+      );
 
   String get _gotObservationStageLabel {
     return switch (_gotObservationStage) {
@@ -654,15 +605,35 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   bool _fetPhotoReadyForReplication(int replication) {
+    final saved = _fetObservationsBySlot[_fetSlotKeyFor(replication)];
     return _fetPlotPhotosBySlot[_fetSlotKeyFor(replication)] != null ||
-        (_selectedReplication == replication &&
-            _latestFetObservation?.dap == _selectedFetDay &&
-            _latestFetObservation?.plotPhotoUrl != null);
+        (saved?.plotPhotoUrl?.trim().isNotEmpty ?? false);
   }
 
   bool _fetSubmittedForReplication(int replication) {
-    return _selectedReplication == replication &&
-        _latestFetObservation?.dap == _selectedFetDay;
+    return _fetObservationsBySlot.containsKey(_fetSlotKeyFor(replication));
+  }
+
+  int get _fetCompletedSlotCount => _fetObservationsBySlot.length;
+
+  bool get _fetHasActionRequired => _fetObservationsBySlot.values.any(
+        (result) =>
+            result.remarkStatus == 'Retest' ||
+            result.remarkStatus == 'Resampling',
+      );
+
+  bool get _fetLotObservationComplete =>
+      _fetCompletedSlotCount == FetRevisionRules.requiredObservationSlots &&
+      !_fetHasActionRequired;
+
+  String get _fetLotProgressStatus => FetRevisionRules.lotProgressStatus(
+        completedSlots: _fetCompletedSlotCount,
+        hasActionRequired: _fetHasActionRequired,
+      );
+
+  _FetObservationResult? _fetObservationFor(int day, int replication) {
+    return _fetObservationsBySlot[
+        FetRevisionRules.slotKey(day: day, replication: replication)];
   }
 
   bool get _gotPlanningReady => _samplePlantingReady(_selectedSample);
@@ -680,6 +651,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final sampleCondition = sample.statusSample.toLowerCase();
     final plantingNote = sample.noteTanam.toLowerCase();
     return workflowStatus.contains('request new sample') ||
+        workflowStatus.contains('sample request') ||
+        workflowStatus.contains('replacement sample') ||
         workflowStatus.contains('resampling') ||
         sampleCondition == 'request new sample' ||
         plantingNote.contains('resampling');
@@ -848,12 +821,25 @@ class _GotFetScreenState extends State<GotFetScreen> {
         .every((slot) => _gotEvidenceBySlot.containsKey(slot.key));
   }
 
+  bool _gotOffTypeDetailCharacterizationReady(_GotOffTypeDetail detail) {
+    if (_gotObservationStage == _GotObservationStage.vegetative) return true;
+    return GotRevisionRules.offTypeCharacterizationGroups
+        .expand((group) => group.fields)
+        .every(
+          (field) =>
+              detail.characterization[field.key]?.trim().isNotEmpty ?? false,
+        );
+  }
+
   bool get _gotOffTypeDetailsReady {
     return GotRevisionRules.offTypeDocumentationReady(
       findingCount: _gotOffType,
       documentedCharacterCount: _gotOffTypeDetails.length,
-      allPhotoPackagesComplete:
-          _gotOffTypeDetails.every(_gotOffTypeDetailPhotosReady),
+      allPhotoPackagesComplete: _gotOffTypeDetails.every(
+        (detail) =>
+            _gotOffTypeDetailPhotosReady(detail) &&
+            _gotOffTypeDetailCharacterizationReady(detail),
+      ),
     );
   }
 
@@ -870,7 +856,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
   bool get _fetCheckReady => !_currentReplicationHasOpenItems;
 
-  bool get _fetSubmittedReady => _latestFetObservation != null;
+  bool get _fetSubmittedReady =>
+      _fetObservationsBySlot.containsKey(_currentFetSlotKey);
 
   bool _sampleObservationDone(_GotFetSample sample) {
     final status = [
@@ -878,6 +865,12 @@ class _GotFetScreenState extends State<GotFetScreen> {
       sample.statusGotVeg,
       sample.finalStatusGot,
     ].join(' ').toLowerCase();
+    if (_sampleSupportsModule(sample, 'FET')) {
+      return status.contains('fet observation complete') ||
+          status.contains('approved') ||
+          status.contains('confirmed') ||
+          status.contains('complete');
+    }
     return status.contains('submit') ||
         status.contains('approved') ||
         status.contains('confirmed') ||
@@ -1428,6 +1421,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       referenceHybrid: _readText(row, const ['reference_hybrid'], fallback: ''),
       requiredPhotoCount:
           math.max(1, _readInt(row, const ['required_photo_count'])),
+      characterization: _readStringMap(row, const ['characterization']),
       sortOrder: _readInt(row, const ['sort_order']),
     );
   }
@@ -1438,7 +1432,10 @@ class _GotFetScreenState extends State<GotFetScreen> {
       await _fetObservationSubscription?.cancel();
       _fetObservationSubscription = null;
       if (!mounted) return;
-      setState(() => _latestFetObservation = null);
+      setState(() {
+        _latestFetObservation = null;
+        _fetObservationsBySlot.clear();
+      });
       return;
     }
 
@@ -1446,30 +1443,30 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final watchKey = [
       sample.lotId,
       sample.sampleId,
-      _fetPlotId,
-      _selectedFetDay,
-      _selectedReplication,
     ].join('|');
-    if (_fetObservationWatchKey == watchKey) return;
+    if (_fetObservationWatchKey == watchKey) {
+      _applySelectedFetObservationFromCache();
+      return;
+    }
 
     _fetObservationWatchKey = watchKey;
     await _fetObservationSubscription?.cancel();
     _fetObservationSubscription = null;
     if (!mounted) return;
-    setState(() => _latestFetObservation = null);
+    setState(() {
+      _latestFetObservation = null;
+      _fetObservationsBySlot.clear();
+    });
 
     _fetObservationSubscription = _gotFetService
-        .watchFetObservationRows(
+        .watchFetObservationRowsForSample(
       lotId: sample.lotId,
       sampleId: sample.sampleId,
-      plotId: _fetPlotId,
-      dap: _selectedFetDay,
-      replication: _selectedReplication,
     )
         .listen(
       (rows) {
         if (!mounted || _fetObservationWatchKey != watchKey) return;
-        _applyFetObservationRow(rows.isEmpty ? null : rows.first);
+        _applyFetObservationRows(rows);
       },
       onError: (Object error) {
         if (!mounted || _fetObservationWatchKey != watchKey) return;
@@ -1482,34 +1479,67 @@ class _GotFetScreenState extends State<GotFetScreen> {
     if (!_hasSamples) return;
     final sample = _selectedSample;
     try {
-      final row = await _gotFetService.fetchLatestFetObservation(
+      final rows = await _gotFetService.fetchFetObservationRowsForSample(
         lotId: sample.lotId,
         sampleId: sample.sampleId,
-        plotId: _fetPlotId,
-        dap: _selectedFetDay,
-        replication: _selectedReplication,
       );
       if (!mounted || _fetObservationWatchKey != watchKey) return;
-      _applyFetObservationRow(row);
+      _applyFetObservationRows(rows);
     } catch (_) {
       if (!mounted || _fetObservationWatchKey != watchKey) return;
-      setState(() => _latestFetObservation = null);
+      setState(() {
+        _latestFetObservation = null;
+        _fetObservationsBySlot.clear();
+      });
     }
   }
 
-  void _applyFetObservationRow(Map<String, dynamic>? row) {
-    final result = row == null ? null : _fetObservationFromRow(row);
+  void _applyFetObservationRows(List<Map<String, dynamic>> rows) {
+    final observations = <int, _FetObservationResult>{};
+    for (final row in rows) {
+      final result = _fetObservationFromRow(row);
+      if (!FetRevisionRules.observationDays.contains(result.dap) ||
+          result.replication < 1 ||
+          result.replication > 2) {
+        continue;
+      }
+      final slotKey = FetRevisionRules.slotKey(
+        day: result.dap,
+        replication: result.replication,
+      );
+      observations.putIfAbsent(slotKey, () => result);
+    }
+
+    setState(() {
+      _fetObservationsBySlot
+        ..clear()
+        ..addAll(observations);
+      for (final entry in observations.entries) {
+        final result = entry.value;
+        if (result.pointStatuses.length == _fetGridPointCount) {
+          _replaceFetPoints(
+            result.replication,
+            result.pointStatuses,
+            day: result.dap,
+          );
+        }
+      }
+      _latestFetObservation = observations[_currentFetSlotKey];
+      _selectedFetRemark = _latestFetObservation?.remarkStatus ?? 'Done';
+    });
+    _setControllerText(
+      _fetNoteController,
+      _latestFetObservation?.remarks ?? '',
+    );
+  }
+
+  void _applySelectedFetObservationFromCache() {
+    final result = _fetObservationsBySlot[_currentFetSlotKey];
     _setControllerText(_fetNoteController, result?.remarks ?? '');
+    if (!mounted) return;
     setState(() {
       _latestFetObservation = result;
       _selectedFetRemark = result?.remarkStatus ?? 'Done';
-      if (result != null && result.pointStatuses.length == _fetGridPointCount) {
-        _replaceFetPoints(
-          result.replication,
-          result.pointStatuses,
-          day: result.dap,
-        );
-      }
     });
   }
 
@@ -2944,54 +2974,121 @@ class _GotFetScreenState extends State<GotFetScreen> {
   }
 
   Widget _buildFetWorkflowCard() {
-    return _WorkflowProgressCard(
-      title: 'Alur FET Day $_selectedFetDay • U$_selectedReplication',
-      subtitle: !_gotPlanningReady
-          ? 'Lengkapi Data Tanam sebelum memulai observasi FET'
-          : _fetSubmittedReady
-              ? 'Hasil Day $_selectedFetDay ulangan ini sudah tersimpan'
-              : _fetCheckReady
-                  ? 'Kroscek selesai, lanjut submit hasil'
-                  : 'Ambil foto plot lalu kroscek 100 titik',
-      steps: [
-        _WorkflowStepData(
-          label: 'Tanam',
-          detail: _gotPlanningReady ? 'Lengkap' : 'Belum lengkap',
-          icon: Icons.edit_calendar_rounded,
-          done: _gotPlanningReady,
-          active: _page == _GotFetPage.gotPlantingData,
+    return Column(
+      children: [
+        _WorkflowProgressCard(
+          title:
+              'Alur FET • $_fetCompletedSlotCount/${FetRevisionRules.requiredObservationSlots} observasi',
+          subtitle: !_gotPlanningReady
+              ? 'Lengkapi Data Tanam sebelum memulai observasi FET'
+              : _fetSubmittedReady
+                  ? 'Hasil Day $_selectedFetDay ulangan ini sudah tersimpan'
+                  : _fetCheckReady
+                      ? 'Kroscek selesai, lanjut submit hasil'
+                      : 'Ambil foto plot lalu kroscek 100 titik',
+          steps: [
+            _WorkflowStepData(
+              label: 'Tanam',
+              detail: _gotPlanningReady ? 'Lengkap' : 'Belum lengkap',
+              icon: Icons.edit_calendar_rounded,
+              done: _gotPlanningReady,
+              active: _page == _GotFetPage.gotPlantingData,
+            ),
+            _WorkflowStepData(
+              label: 'Foto D$_selectedFetDay',
+              detail: _fetPhotoReady ? 'Siap' : 'Belum ada',
+              icon: Icons.camera_alt_rounded,
+              done: _fetPhotoReady,
+              active: _page == _GotFetPage.fetPhoto,
+            ),
+            _WorkflowStepData(
+              label: 'Kroscek',
+              detail: _fetCheckReady
+                  ? '100 titik'
+                  : '${_currentReplicationReview + _currentReplicationNotReadable} terbuka',
+              icon: Icons.grid_on_rounded,
+              done: _fetCheckReady,
+              active: _page == _GotFetPage.fetAnalysis,
+            ),
+            _WorkflowStepData(
+              label: 'Submit',
+              detail: _fetSubmittedReady ? _selectedFetRemark : 'Belum submit',
+              icon: Icons.send_rounded,
+              done: _fetSubmittedReady,
+              active: _page == _GotFetPage.fetInput,
+            ),
+            _WorkflowStepData(
+              label: 'Review',
+              detail: _selectedSample.status,
+              icon: Icons.verified_rounded,
+              done: _selectedSampleSubmittedOrReviewed,
+              active: _page == _GotFetPage.fetReview,
+            ),
+          ],
         ),
-        _WorkflowStepData(
-          label: 'Foto D$_selectedFetDay',
-          detail: _fetPhotoReady ? 'Siap' : 'Belum ada',
-          icon: Icons.camera_alt_rounded,
-          done: _fetPhotoReady,
-          active: _page == _GotFetPage.fetPhoto,
-        ),
-        _WorkflowStepData(
-          label: 'Kroscek',
-          detail: _fetCheckReady
-              ? '100 titik'
-              : '${_currentReplicationReview + _currentReplicationNotReadable} terbuka',
-          icon: Icons.grid_on_rounded,
-          done: _fetCheckReady,
-          active: _page == _GotFetPage.fetAnalysis,
-        ),
-        _WorkflowStepData(
-          label: 'Submit',
-          detail: _fetSubmittedReady ? _selectedFetRemark : 'Belum submit',
-          icon: Icons.send_rounded,
-          done: _fetSubmittedReady,
-          active: _page == _GotFetPage.fetInput,
-        ),
-        _WorkflowStepData(
-          label: 'Review',
-          detail: _selectedSample.status,
-          icon: Icons.verified_rounded,
-          done: _selectedSampleSubmittedOrReviewed,
-          active: _page == _GotFetPage.fetReview,
-        ),
+        const SizedBox(height: 12),
+        _buildFetLotObservationStatusCard(),
       ],
+    );
+  }
+
+  Widget _buildFetLotObservationStatusCard() {
+    final color = _fetLotObservationComplete
+        ? AdvantaColors.success
+        : _fetHasActionRequired
+            ? AdvantaColors.error
+            : AdvantaColors.warning;
+    return _PanelCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.fact_check_rounded, color: color),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Status Observasi per Lot',
+                  style: AdvantaText.bodyBold.copyWith(
+                    color: _gotFetTextColor(context),
+                  ),
+                ),
+              ),
+              _StatusPill(label: _fetLotProgressStatus, color: color),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            _fetLotObservationComplete
+                ? 'Day 7 dan Day 11, masing-masing Ulangan 1 dan 2, sudah selesai.'
+                : 'Lot belum dianggap selesai sampai empat slot Day 7/11 dan Ulangan 1/2 tersimpan dengan status Done.',
+            style: _mutedTextStyle(context),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final day in FetRevisionRules.observationDays)
+                for (final replication in const [1, 2])
+                  Builder(
+                    builder: (context) {
+                      final observation = _fetObservationFor(day, replication);
+                      final label = observation == null
+                          ? 'D$day • U$replication: Pending'
+                          : 'D$day • U$replication: ${observation.remarkStatus}';
+                      final slotColor = observation == null
+                          ? AdvantaColors.warning
+                          : observation.remarkStatus == 'Done'
+                              ? AdvantaColors.success
+                              : AdvantaColors.error;
+                      return _StatusPill(label: label, color: slotColor);
+                    },
+                  ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -4009,7 +4106,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Gunakan tombol ini untuk mencatat progress sample sebelum tanam, termasuk request new sample bila sample tidak bisa diamati.',
+            'Gunakan tombol ini untuk mencatat progress lot. Request sample dapat dibuat pada tahap tanam, vegetatif, maupun generatif dan wajib disertai alasan.',
             style: AdvantaText.body2.copyWith(
               color: _gotFetMutedColor(context),
             ),
@@ -4058,10 +4155,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
                       label: const Text('Request Sample'),
                       onPressed: _isSyncing
                           ? null
-                          : () => _confirmTrackingStatus(
-                                'Request New Sample',
-                                remarks:
-                                    'Sample tidak bisa diamati, request new sample.',
+                          : () => _requestNewSample(
                                 onConfirmed: onConfirmed,
                               ),
                     ),
@@ -4069,6 +4163,76 @@ class _GotFetScreenState extends State<GotFetScreen> {
                 ],
               );
             },
+          ),
+          if (_sampleRequestsNewSample(_selectedSample)) ...[
+            const SizedBox(height: 14),
+            _buildSampleRequestHandlingActions(onConfirmed: onConfirmed),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSampleRequestHandlingActions({VoidCallback? onConfirmed}) {
+    final status =
+        GotRevisionRules.normalizeWorkflowStatus(_selectedSample.status);
+    late final String nextStatus;
+    late final String buttonLabel;
+    late final String remarks;
+
+    if (status.contains('replacement sample dispatched')) {
+      nextStatus = 'Ready to Plant';
+      buttonLabel = 'Sample Pengganti Diterima';
+      remarks =
+          'Sample pengganti diterima tim lapangan dan siap masuk proses tanam.';
+    } else if (status.contains('request received by lab')) {
+      nextStatus = 'Replacement Sample Dispatched';
+      buttonLabel = 'Pengganti Dikirim';
+      remarks = 'Lab mengirim sample pengganti ke tim lapangan.';
+    } else {
+      nextStatus = 'Sample Request Received by Lab';
+      buttonLabel = 'Diterima Lab';
+      remarks = 'Informasi request sample sudah diterima oleh lab.';
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AdvantaColors.warning.withAlpha(
+          _gotFetIsDark(context) ? 42 : 20,
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AdvantaColors.warning.withAlpha(100)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Tracing Request Sample',
+            style: AdvantaText.bodyBold.copyWith(
+              color: _gotFetTextColor(context),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Status saat ini: ${_selectedSample.status}. Setiap perubahan tercatat di Riwayat Status beserta petugas dan waktunya.',
+            style: _mutedTextStyle(context),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _isSyncing
+                  ? null
+                  : () => _confirmTrackingStatus(
+                        nextStatus,
+                        remarks: remarks,
+                        onConfirmed: onConfirmed,
+                      ),
+              icon: const Icon(Icons.route_rounded),
+              label: Text(buttonLabel),
+            ),
           ),
         ],
       ),
@@ -4220,7 +4384,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
               value: sample.weekOfPlanting?.toString() ?? '-'),
           const SizedBox(height: 8),
           _InfoRow(
-              label: 'Result Estimation',
+              label: _activeModule == _InspectionModule.fet
+                  ? 'Result Estimation (+12 hari)'
+                  : 'Result Estimation',
               value: _formatDate(sample.resultEstimation)),
           const SizedBox(height: 8),
           _InfoRow(
@@ -4925,6 +5091,18 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 12),
           _buildGotObservationSyncStatus(),
           const SizedBox(height: 12),
+          _buildGotDropdown<String>(
+            label: 'Kelas Uji / Formula',
+            helperText: 'PS memakai batas 99,5%; Komersil memakai batas 95%.',
+            value: _selectedSample.purityClass,
+            options: GotRevisionRules.purityClasses,
+            text: (value) => value,
+            onChanged: (value) {
+              setState(() => _selectedSample.purityClass = value);
+              _persistSelectedSamplePlanning();
+            },
+          ),
+          const SizedBox(height: 12),
           _CounterRow(
             label: 'Total Tanaman Diamati',
             value: _gotTotalObserved,
@@ -5007,8 +5185,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
                   : 'Invalid'),
           const SizedBox(height: 8),
           _InfoRow(
+              label: 'Tanaman Meragukan (%)',
+              value: _gotCountsValid
+                  ? _gotSuspiciousPercent.toStringAsFixed(2)
+                  : 'Invalid'),
+          const SizedBox(height: 8),
+          _InfoRow(
               label: 'Total (%)',
-              value: _gotCountsValid ? '100.00' : 'Invalid'),
+              value: _gotCountsValid
+                  ? _gotTotalPercent.toStringAsFixed(2)
+                  : 'Invalid'),
           const SizedBox(height: 8),
           _InfoRow(label: 'Kolom Status Manual', value: _gotStatusColumnLabel),
         ],
@@ -5553,6 +5739,28 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ],
           const SizedBox(height: 6),
           Text('Karakter: ${detail.characterNote}'),
+          if (readOnly &&
+              _gotObservationStage == _GotObservationStage.finalGenerative) ...[
+            const SizedBox(height: 8),
+            for (final group
+                in GotRevisionRules.offTypeCharacterizationGroups) ...[
+              Text(
+                group.photoLabel,
+                style: AdvantaText.caption.copyWith(
+                  color: _gotFetTextColor(context),
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              for (final field in group.fields)
+                Text(
+                  '${field.label}: ${detail.characterization[field.key] ?? '-'}',
+                  style: AdvantaText.caption.copyWith(
+                    color: _gotFetMutedColor(context),
+                  ),
+                ),
+              const SizedBox(height: 6),
+            ],
+          ],
           const SizedBox(height: 10),
           if (readOnly)
             Wrap(
@@ -5588,6 +5796,14 @@ class _GotFetScreenState extends State<GotFetScreen> {
                           _gotEvidenceBySlot[slots[i].key]!,
                         ),
               ),
+              if (GotRevisionRules.characterizationGroupForPhoto(
+                _gotObservationStagePayload,
+                slots[i].label,
+              )
+                  case final group?) ...[
+                const SizedBox(height: 8),
+                _buildGotOffTypeCharacterizationSection(detail, group),
+              ],
               if (i != slots.length - 1) const SizedBox(height: 8),
             ],
           if (!readOnly) ...[
@@ -5611,6 +5827,184 @@ class _GotFetScreenState extends State<GotFetScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildGotOffTypeCharacterizationSection(
+    _GotOffTypeDetail detail,
+    GotOffTypeCharacterizationGroup group,
+  ) {
+    final completed = group.fields
+        .where(
+          (field) =>
+              detail.characterization[field.key]?.trim().isNotEmpty ?? false,
+        )
+        .length;
+    final ready = completed == group.fields.length;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: (ready ? AdvantaColors.success : AdvantaColors.warning)
+            .withAlpha(_gotFetIsDark(context) ? 34 : 16),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: (ready ? AdvantaColors.success : AdvantaColors.warning)
+              .withAlpha(90),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Karakterisasi ${group.photoLabel}',
+                  style: AdvantaText.caption.copyWith(
+                    color: _gotFetTextColor(context),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              _StatusPill(
+                label: '$completed/${group.fields.length} kolom',
+                color: ready ? AdvantaColors.success : AdvantaColors.warning,
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final field in group.fields)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                '${field.label}: ${detail.characterization[field.key]?.trim().isNotEmpty == true ? detail.characterization[field.key] : '-'}',
+                style: AdvantaText.caption.copyWith(
+                  color: _gotFetMutedColor(context),
+                ),
+              ),
+            ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () =>
+                  _openGotOffTypeCharacterizationEditor(detail, group),
+              icon: const Icon(Icons.edit_note_rounded),
+              label: Text(ready ? 'Edit Karakterisasi' : 'Isi Karakterisasi'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openGotOffTypeCharacterizationEditor(
+    _GotOffTypeDetail detail,
+    GotOffTypeCharacterizationGroup group,
+  ) async {
+    final controllers = {
+      for (final field in group.fields)
+        field.key: TextEditingController(
+          text: detail.characterization[field.key] ?? '',
+        ),
+    };
+    var saving = false;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Karakterisasi • ${group.photoLabel}'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var index = 0; index < group.fields.length; index++) ...[
+                    TextField(
+                      controller: controllers[group.fields[index].key],
+                      enabled: !saving,
+                      decoration: InputDecoration(
+                        labelText: '${group.fields[index].label} *',
+                        hintText: 'Isi ciri fisik hasil pengamatan',
+                      ),
+                    ),
+                    if (index != group.fields.length - 1)
+                      const SizedBox(height: 12),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: saving ? null : () => Navigator.pop(dialogContext),
+              child: const Text('Batal'),
+            ),
+            FilledButton.icon(
+              onPressed: saving
+                  ? null
+                  : () async {
+                      final values = {
+                        ...detail.characterization,
+                        for (final field in group.fields)
+                          field.key: controllers[field.key]!.text.trim(),
+                      };
+                      final missing = group.fields
+                          .where((field) => values[field.key]!.isEmpty)
+                          .map((field) => field.label)
+                          .toList();
+                      if (missing.isNotEmpty) {
+                        _showSnack('Lengkapi: ${missing.join(', ')}.');
+                        return;
+                      }
+                      setDialogState(() => saving = true);
+                      try {
+                        await _gotFetService.saveGotOffTypeDetail(
+                          id: detail.id,
+                          lotId: _selectedSample.lotId,
+                          sampleId: _selectedSample.sampleId,
+                          plotId: _gotPlotId,
+                          stage: _gotObservationStagePayload,
+                          ruleId: detail.ruleId,
+                          categoryNo: detail.categoryNo,
+                          typeCode: detail.typeCode,
+                          typeLabel: detail.typeLabel,
+                          characterNote: detail.characterNote,
+                          similarityAssessment: detail.similarity.payload,
+                          referenceHybrid: detail.referenceHybrid,
+                          characterization: values,
+                          requiredPhotoCount: detail.requiredPhotoCount,
+                          sortOrder: detail.sortOrder,
+                          actor: _actorName,
+                        );
+                        if (dialogContext.mounted) {
+                          Navigator.pop(dialogContext);
+                        }
+                      } catch (error) {
+                        if (!mounted) return;
+                        _showSnack(
+                          'Gagal simpan karakterisasi: ${_friendlyError(error)}',
+                        );
+                        setDialogState(() => saving = false);
+                      }
+                    },
+              icon: saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.save_rounded),
+              label: Text(saving ? 'Menyimpan...' : 'Simpan'),
+            ),
+          ],
+        ),
+      ),
+    );
+    for (final controller in controllers.values) {
+      controller.dispose();
+    }
   }
 
   Future<void> _openGotOffTypeEditor([
@@ -5746,6 +6140,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
                               characterNote: character,
                               similarityAssessment: similarity.payload,
                               referenceHybrid: referenceController.text.trim(),
+                              characterization:
+                                  detail?.characterization ?? const {},
                               requiredPhotoCount:
                                   _gotRequiredOffTypePhotosPerSample,
                               sortOrder: detail == null
@@ -6385,6 +6781,16 @@ class _GotFetScreenState extends State<GotFetScreen> {
           const SizedBox(height: 8),
           _InfoRow(
               label: 'Male (%)', value: _gotMalePercent.toStringAsFixed(2)),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Tanaman Meragukan (%)',
+            value: _gotSuspiciousPercent.toStringAsFixed(2),
+          ),
+          const SizedBox(height: 8),
+          _InfoRow(
+            label: 'Total (%)',
+            value: _gotTotalPercent.toStringAsFixed(2),
+          ),
           const SizedBox(height: 12),
           _InfoRow(label: 'Foto Evidence', value: _gotEvidenceProgressText),
         ],
@@ -7211,7 +7617,9 @@ class _GotFetScreenState extends State<GotFetScreen> {
     );
     if (picked == null || !mounted) return;
 
-    final resultEstimation = picked.add(const Duration(days: 65));
+    final resultEstimation = _activeModule == _InspectionModule.fet
+        ? FetRevisionRules.resultEstimation(picked)
+        : picked.add(const Duration(days: 65));
     setState(() {
       sample.plantingDate = picked;
       sample.weekOfPlanting = _excelWeekOfYear(picked);
@@ -7243,6 +7651,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
       landAreaName: sample.landAreaName,
       batchLotField: sample.batchLotField,
       statusSample: sample.statusSample,
+      purityClass: sample.purityClass,
     );
   }
 
@@ -7336,14 +7745,22 @@ class _GotFetScreenState extends State<GotFetScreen> {
       return;
     }
     if (!_gotCountsValid) {
-      _showSnack('Jumlah off-type, selfing, dan male melebihi total tanaman.');
+      _showSnack(
+        'Jumlah off-type, selfing, male, dan tanaman meragukan melebihi total tanaman.',
+      );
       return;
     }
     if (!_gotEvidenceReady) {
       _showSnack(
         _gotOffTypeDetails.isEmpty
             ? 'Tambahkan minimal satu jenis karakter Off-Type yang ditemukan.'
-            : 'Lengkapi $_gotRequiredOffTypePhotosPerSample foto untuk setiap jenis karakter Off-Type.',
+            : _gotObservationStage == _GotObservationStage.finalGenerative &&
+                    _gotOffTypeDetails.any(
+                      (detail) =>
+                          !_gotOffTypeDetailCharacterizationReady(detail),
+                    )
+                ? 'Lengkapi semua kolom karakterisasi pada setiap foto Off-Type.'
+                : 'Lengkapi $_gotRequiredOffTypePhotosPerSample foto untuk setiap jenis karakter Off-Type.',
       );
       return;
     }
@@ -7388,6 +7805,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
           offTypePercent: _gotOffTypePercent,
           selfingPercent: _gotSelfingPercent,
           malePercent: _gotMalePercent,
+          suspiciousPercent: _gotSuspiciousPercent,
+          totalPercent: _gotTotalPercent,
           workflowStatus: workflowStatus,
         );
         if (!mounted) return;
@@ -7415,7 +7834,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
 
     await _runBackendAction(
       successMessage:
-          'FET Day $_selectedFetDay Ulangan $_selectedReplication: $_selectedFetRemark.',
+          'FET Day $_selectedFetDay Ulangan $_selectedReplication tersimpan. Foto disinkronkan atau diamankan di antrean lokal.',
       action: () async {
         await _gotFetService.submitFetObservation(
           lotId: _selectedSample.lotId,
@@ -7435,17 +7854,82 @@ class _GotFetScreenState extends State<GotFetScreen> {
           ],
           submittedBy: _actorName,
           remarkStatus: _selectedFetRemark,
-          plotPhoto: _currentFetPlotPhoto,
+          plotPhoto: null,
           remarks: _optionalText(_fetNoteController),
         );
-        final sampleStatus =
-            _selectedFetRemark == 'Done' ? 'FET Submitted' : _selectedFetRemark;
+        final plotPhoto = _currentFetPlotPhoto;
+        final photoMetadata = _currentFetPlotPhotoMetadata;
+        if (plotPhoto != null) {
+          try {
+            await _gotFetService.saveFetEvidencePhoto(
+              file: plotPhoto,
+              lotId: _selectedSample.lotId,
+              sampleId: _selectedSample.sampleId,
+              plotId: _fetPlotId,
+              dap: _selectedFetDay,
+              replication: _selectedReplication,
+              uploadedBy: _actorName,
+            );
+          } catch (_) {
+            if (photoMetadata != null) {
+              await _photoPipeline.enqueueFetEvidence(
+                prepared: _PreparedSmartPhoto(
+                  file: plotPhoto,
+                  analysisFile: _currentFetAnalysisPhoto ?? plotPhoto,
+                  metadata: photoMetadata,
+                  duplicateLikely: false,
+                ),
+                lotId: _selectedSample.lotId,
+                sampleId: _selectedSample.sampleId,
+                plotId: _fetPlotId,
+                dap: _selectedFetDay,
+                replication: _selectedReplication,
+                uploadedBy: _actorName,
+              );
+              await _refreshSmartPhotoStatus();
+            }
+          }
+        }
+        final savedResult = _FetObservationResult(
+          lotId: _selectedSample.lotId,
+          sampleId: _selectedSample.sampleId,
+          plotId: _fetPlotId,
+          replication: _selectedReplication,
+          dap: _selectedFetDay,
+          totalPoints: _currentReplication.length,
+          grownCount: _currentReplicationGrown,
+          notGrownCount: _currentReplicationNotGrown,
+          reviewCount: _currentReplicationReview,
+          notReadableCount: _currentReplicationNotReadable,
+          emergencePercent: _currentReplicationEmergence,
+          plotPhotoUrl: _latestFetObservation?.plotPhotoUrl,
+          submittedBy: _actorName,
+          submittedAt: DateTime.now(),
+          remarkStatus: _selectedFetRemark,
+          remarks: _optionalText(_fetNoteController),
+          pointStatuses: List<_FetPointStatus>.from(_currentReplication),
+        );
+        final projected = Map<int, _FetObservationResult>.from(
+          _fetObservationsBySlot,
+        )..[_currentFetSlotKey] = savedResult;
+        final sampleStatus = FetRevisionRules.lotProgressStatus(
+          completedSlots: projected.length,
+          hasActionRequired: projected.values.any(
+            (result) =>
+                result.remarkStatus == 'Retest' ||
+                result.remarkStatus == 'Resampling',
+          ),
+        );
         await _gotFetService.updateSampleStatus(
           batch: _selectedSample.batch,
           status: sampleStatus,
         );
         if (!mounted) return;
         setState(() {
+          _fetObservationsBySlot
+            ..clear()
+            ..addAll(projected);
+          _latestFetObservation = savedResult;
           _selectedSample.status = sampleStatus;
           _selectFirstSampleForActiveQueue(_activeModuleCode);
         });
@@ -7489,6 +7973,68 @@ class _GotFetScreenState extends State<GotFetScreen> {
         });
         onSubmitted?.call();
       },
+    );
+  }
+
+  Future<void> _requestNewSample({VoidCallback? onConfirmed}) async {
+    final reasonController = TextEditingController();
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Request New Sample'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Lot ${_selectedSample.lotId} • tahap ${_selectedSample.status}',
+              style: _mutedTextStyle(dialogContext),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonController,
+              autofocus: true,
+              minLines: 3,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                labelText: 'Alasan request *',
+                hintText:
+                    'Contoh: jumlah benih tidak cukup atau sample tidak dapat diamati',
+                prefixIcon: Icon(Icons.edit_note_rounded),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Batal'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              final value = reasonController.text.trim();
+              if (value.isEmpty) {
+                ScaffoldMessenger.of(dialogContext).showSnackBar(
+                  const SnackBar(content: Text('Alasan request wajib diisi.')),
+                );
+                return;
+              }
+              Navigator.pop(dialogContext, value);
+            },
+            icon: const Icon(Icons.send_rounded),
+            label: const Text('Kirim Request'),
+          ),
+        ],
+      ),
+    );
+    reasonController.dispose();
+    if (reason == null || reason.trim().isEmpty) return;
+
+    await _confirmTrackingStatus(
+      'Request New Sample',
+      remarks:
+          'Alasan request: ${reason.trim()} | Tahap saat request: ${_selectedSample.status}',
+      onConfirmed: onConfirmed,
     );
   }
 
@@ -7750,6 +8296,8 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final normalized = status.toLowerCase();
     if (normalized.contains('approved')) return AdvantaColors.success;
     if (normalized.contains('request new sample') ||
+        normalized.contains('sample request') ||
+        normalized.contains('replacement sample') ||
         normalized.contains('resample') ||
         normalized.contains('resampling')) {
       return AdvantaColors.error;
@@ -7849,6 +8397,7 @@ class _GotFetScreenState extends State<GotFetScreen> {
           'Note Sample/ Reason testing'
         ],
       ),
+      purityClass: _purityClassFromRow(row),
       deliveryDate1:
           _readDate(row, const ['delivery_date_1', 'Delivery Date 1']),
       deliveryDate2:
@@ -7932,6 +8481,39 @@ class _GotFetScreenState extends State<GotFetScreen> {
     return 'FET';
   }
 
+  String _purityClassFromRow(Map<String, dynamic> row) {
+    final saved = _readText(
+      row,
+      const ['purity_class', 'Purity Class', 'Kelas Uji'],
+      fallback: '',
+    );
+    for (final option in GotRevisionRules.purityClasses) {
+      if (saved.toLowerCase() == option.toLowerCase()) return option;
+    }
+
+    final source = _normalizeRuleText([
+      _readText(row, const ['type_seed', 'Type Seed']),
+      _readText(row, const ['category', 'Category']),
+      _readText(row, const ['process_stage', 'Process Stage']),
+      _readText(row, const ['reason_testing', 'Reason Testing']),
+      _readText(row, const ['gender', 'Gender']),
+    ].join(' '));
+    if (_containsRuleTerm(source, const [
+      'ps',
+      'parent seed',
+      'parent stock',
+      'parental',
+      'inbred',
+      'male',
+      'female',
+      'jantan',
+      'betina',
+    ])) {
+      return GotRevisionRules.parentSeedPurityClass;
+    }
+    return GotRevisionRules.commercialPurityClass;
+  }
+
   List<_TrackingStep> _trackingStepsFromRow(Map<String, dynamic> row) {
     final deliveryDate =
         _readDate(row, const ['delivery_date_1', 'Delivery Date 1']);
@@ -7996,6 +8578,19 @@ class _GotFetScreenState extends State<GotFetScreen> {
     final value = _readValue(row, keys);
     if (value is num) return value;
     return num.tryParse(value?.toString() ?? '');
+  }
+
+  Map<String, String> _readStringMap(
+    Map<String, dynamic> row,
+    List<String> keys,
+  ) {
+    final raw = _readValue(row, keys);
+    if (raw is! Map) return const {};
+    return {
+      for (final entry in raw.entries)
+        if (entry.value != null && entry.value.toString().trim().isNotEmpty)
+          entry.key.toString(): entry.value.toString().trim(),
+    };
   }
 
   double? _readDouble(Map<String, dynamic> row, List<String> keys) {
